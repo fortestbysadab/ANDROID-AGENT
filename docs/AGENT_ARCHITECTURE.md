@@ -8,6 +8,8 @@ Selected implementation decisions:
 - Owner-autonomous policy for bounded actions; external side effects still require approval and critical tools are denied
 - Clean v2 (`agent_bot.py` and `android_agent/`) alongside the untouched legacy `bot.py`
 
+Current implementation includes 41 typed tools, five progressively loaded bundled skills, scoped text-file creation and file delivery, artifact/location delivery, and one-time Telegram approval buttons for calls and SMS. The approval store is intentionally process-local for now; SQLite durability remains a hardening task.
+
 ## 1. Goal
 
 Turn the current Telegram-to-Termux command bot into a reliable, model-agnostic agent runtime.

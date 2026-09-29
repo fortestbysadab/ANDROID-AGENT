@@ -1,0 +1,1 @@
+{"id":"communications","description":"Calls and messages with exact recipients, content, and confirmation.","always":false,"triggers":["call","phone","sms","text message","message to","dial","contact"]}

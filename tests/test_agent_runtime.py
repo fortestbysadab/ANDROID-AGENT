@@ -103,6 +103,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(outcome.pending_approvals[0].call.arguments, {"level": 8})
         self.assertEqual(len(outcome.pending_approvals[0].argument_hash), 64)
 
+        result = runtime.execute_approved(
+            outcome.pending_approvals[0], actor_id="42", chat_id=42, run_id=outcome.run_id
+        )
+        self.assertEqual(result.status, "ok")
+
     def test_non_owner_is_denied(self):
         calls = []
         planner = FakePlanner(

@@ -12,7 +12,8 @@ from typing import Any, Mapping, Sequence
 
 from android_agent.models.base import Planner, PlannerResponse, ToolCall
 from android_agent.observability.audit import AuditSink, NullAuditSink
-from android_agent.policy.engine import Policy, PolicyDecision, PolicyResult
+from android_agent.policy.engine import Policy, PolicyDecision
+from android_agent.skills.loader import SkillRouter
 from android_agent.tools.base import SchemaValidationError, ToolContext, ToolResult
 from android_agent.tools.registry import ToolRegistry
 
@@ -59,6 +60,7 @@ class AgentRuntime:
         system_prompt: str,
         limits: RuntimeLimits | None = None,
         audit: AuditSink | None = None,
+        skill_router: SkillRouter | None = None,
     ) -> None:
         self.planner = planner
         self.registry = registry
@@ -66,6 +68,7 @@ class AgentRuntime:
         self.system_prompt = system_prompt.strip()
         self.limits = limits or RuntimeLimits()
         self.audit = audit or NullAuditSink()
+        self.skill_router = skill_router
 
     def run(
         self,
@@ -78,8 +81,14 @@ class AgentRuntime:
         run_id = uuid.uuid4().hex
         context = ToolContext(str(actor_id), chat_id, run_id, direct_user_request=True)
         messages: list[Mapping[str, Any]] = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
+        skill_instructions = (
+            self.skill_router.instructions_for(user_text) if self.skill_router is not None else ""
+        )
+        system_content = "\n\n".join(
+            part for part in (self.system_prompt, skill_instructions) if part.strip()
+        )
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
         messages.extend(prior_messages)
         messages.append({"role": "user", "content": user_text})
 
@@ -156,6 +165,39 @@ class AgentRuntime:
                 )
 
         return self._budget_outcome(run_id, results, messages, "model turn budget exhausted")
+
+    def execute_approved(
+        self,
+        pending: PendingApproval,
+        *,
+        actor_id: str,
+        chat_id: int,
+        run_id: str | None = None,
+    ) -> ToolResult:
+        """Execute one exact, previously approved proposal.
+
+        The caller owns approval identity, expiry, and one-time-use checks. This
+        method revalidates tool version, arguments, and the frozen hash.
+        """
+        approval_run_id = run_id or uuid.uuid4().hex
+        context = ToolContext(str(actor_id), chat_id, approval_run_id, direct_user_request=True)
+        tool = self.registry.get(pending.call.name)
+        if tool is None or tool.version != pending.tool_version:
+            return ToolResult.error("The approved tool changed; request the action again.", code="approval_stale")
+        try:
+            arguments = tool.validate(pending.call.arguments)
+        except SchemaValidationError:
+            return ToolResult.error("The approved arguments are no longer valid.", code="approval_stale")
+        expected = _argument_hash(tool.name, tool.version, arguments)
+        if expected != pending.argument_hash:
+            return ToolResult.error("Approval arguments did not match.", code="approval_mismatch")
+        self.audit.emit("approval.executing", {"run_id": approval_run_id, "tool": tool.name})
+        result = _execute_with_timeout(tool.handler, context, arguments, tool.timeout_seconds)
+        self.audit.emit(
+            "tool.completed" if result.status == "ok" else "tool.failed",
+            {"run_id": approval_run_id, "tool": tool.name, "status": result.status},
+        )
+        return result
 
     def _process_call(
         self, context: ToolContext, call: ToolCall

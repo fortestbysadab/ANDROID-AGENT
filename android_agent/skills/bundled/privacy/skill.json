@@ -1,0 +1,1 @@
+{"id":"sensitive-data","description":"Minimize exposure while handling private device data.","always":false,"triggers":["location","notification","inbox","sms","contact","clipboard","photo","camera","screenshot","recording","microphone"]}

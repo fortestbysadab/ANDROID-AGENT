@@ -11,7 +11,11 @@ Screen recording is intentionally out of scope.
 
 ## V2 safety model
 
-The LLM is an untrusted planner. Tool proposals pass through strict schema validation and deterministic owner/risk policy before execution. The model has no generic shell tool. The initial v2 tool set contains battery status, torch, brightness, and volume controls only.
+The LLM is an untrusted planner. Tool proposals pass through strict schema validation and deterministic owner/risk policy before execution. The model has no generic shell tool.
+
+V2 currently exposes **41 narrow typed tools** covering battery/system status, torch, brightness, volume, Wi-Fi, clipboard, camera, location, screenshots, audio recording, media, notifications, SMS inbox, contacts, calls/SMS with confirmation, scoped file creation/retrieval, and bounded ADB controls. Screen recording and arbitrary shell execution remain intentionally unavailable.
+
+Five bundled skills add progressively loaded guidance for core reliability, device control, files, communications, and sensitive data. Skills can guide tool selection but cannot grant permissions.
 
 ## Run v2
 

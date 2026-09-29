@@ -1,0 +1,1 @@
+{"id":"safe-files","description":"Create, inspect, and send files without guessing paths or leaking data.","always":false,"triggers":["file","folder","document","save","write","create","read","attach","send me","download","note","csv","json"]}

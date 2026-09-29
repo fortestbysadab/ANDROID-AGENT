@@ -1,0 +1,1 @@
+{"id":"device-control","description":"Reliable bounded Android settings and device-control actions.","always":false,"triggers":["battery","volume","brightness","torch","flashlight","wifi","screen","app","media","play","pause","vibrate","wake","camera","photo","record","clipboard","type","tap","swipe"]}

@@ -37,6 +37,7 @@ from android_agent.policy.engine import DefaultPolicy
 from android_agent.skills.loader import SkillRouter
 from android_agent.tools.base import ToolResult
 from android_agent.tools.catalog import build_full_registry
+from android_agent.tools.media import describe_library, media_root, storage_advice
 
 logger = logging.getLogger(__name__)
 
@@ -117,15 +118,28 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
         path = result.data.get("artifact_path")
         if not isinstance(path, str) or not os.path.isfile(path):
             return
+
+        # Captured media is kept on the device, filed by kind and timestamp.
+        # Only genuinely temporary scratch files are removed after delivery.
+        caption = result.summary
+        saved_to = result.data.get("saved_to")
+        if isinstance(saved_to, str):
+            caption = f"{result.summary}\nSaved: {saved_to}"
+
         try:
+            extension = os.path.splitext(path)[1].lower()
             with open(path, "rb") as artifact:
-                extension = os.path.splitext(path)[1].lower()
                 if extension in {".jpg", ".jpeg", ".png"}:
-                    bot.send_photo(chat_id, artifact, caption=result.summary)
+                    bot.send_photo(chat_id, artifact, caption=caption[:1000])
                 elif extension in {".m4a", ".mp3", ".wav", ".ogg", ".opus"}:
-                    bot.send_audio(chat_id, artifact, caption=result.summary)
+                    bot.send_audio(chat_id, artifact, caption=caption[:1000])
                 else:
-                    bot.send_document(chat_id, artifact, caption=result.summary)
+                    bot.send_document(chat_id, artifact, caption=caption[:1000])
+            # Send a second copy as a file so the original resolution and
+            # the exact filename survive Telegram's photo recompression.
+            if extension in {".jpg", ".jpeg", ".png"}:
+                with open(path, "rb") as original:
+                    bot.send_document(chat_id, original, visible_file_name=os.path.basename(path))
         finally:
             if result.data.get("temporary_artifact"):
                 try:
@@ -168,6 +182,7 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             "Commands:\n"
             "• /new — start a new conversation now\n"
             "• /session — show the current session\n"
+            "• /media — list captured photos, recordings and screenshots\n"
             "• /agent_status — runtime details\n"
             "• /tools — list available tools\n\n"
             "Screen recording and arbitrary shell access are not available.",
@@ -205,6 +220,12 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             if existed
             else "Already starting fresh; there was no active conversation.",
         )
+
+    @bot.message_handler(
+        commands=["media"], func=lambda message: getattr(message, "_authorized", False)
+    )
+    def media_library(message):
+        bot.reply_to(message, describe_library()[:4000])
 
     @bot.message_handler(
         commands=["session"], func=lambda message: getattr(message, "_authorized", False)
@@ -362,6 +383,10 @@ def main() -> None:
 
     configure_logging(settings.log_level)
     logger.info("Starting Android Agent v2 with config: %s", settings.redacted())
+    logger.info("Media is saved to %s", media_root())
+    advice = storage_advice()
+    if advice:
+        logger.warning(advice)
     bot = build_bot(settings)
     logger.info("Android Agent v2 is polling")
     while True:

@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shlex
 import subprocess
-import tempfile
 from collections.abc import Mapping
 from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
+from .media import SCREENSHOT, new_media_path
 
 
 def _run(args: list[str], timeout: float = 15) -> tuple[bool, str]:
@@ -104,24 +103,27 @@ def _screenshot(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResul
     del context, arguments
     if not _connected():
         return ToolResult.error("Wireless ADB is not connected.", code="adb_not_connected", retryable=True)
-    directory = os.path.expanduser("~/telegram_agent_v2/artifacts")
-    os.makedirs(directory, exist_ok=True)
-    fd, local_path = tempfile.mkstemp(prefix="screenshot-", suffix=".png", dir=directory)
-    os.close(fd)
+    path = new_media_path(SCREENSHOT)
+    local_path = str(path)
     device_path = "/sdcard/.android_agent_screenshot.png"
     ok, output = _run(["adb", "shell", "screencap", "-p", device_path], 15)
     if ok:
         ok, output = _run(["adb", "pull", device_path, local_path], 20)
     _run(["adb", "shell", "rm", "-f", device_path], 10)
-    if not ok or not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+    if not ok or not path.exists() or path.stat().st_size == 0:
         try:
-            os.remove(local_path)
+            path.unlink(missing_ok=True)
         except OSError:
             pass
         return ToolResult.error(output or "Screenshot failed.", code="adb_error", retryable=True)
     return ToolResult.ok(
-        "Screenshot captured.",
-        {"artifact_path": local_path, "artifact_name": "screenshot.png", "temporary_artifact": True},
+        f"Screenshot captured and saved as {path.name}.",
+        {
+            "artifact_path": local_path,
+            "artifact_name": path.name,
+            "saved_to": local_path,
+            "media_kind": "screenshot",
+        },
     )
 
 

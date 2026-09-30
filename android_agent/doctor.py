@@ -171,6 +171,24 @@ def check_multi_turn(settings: Settings) -> bool:
     )
 
 
+def check_media_storage() -> bool:
+    """Media must land somewhere the owner can actually open."""
+    from android_agent.tools.media import MEDIA_KINDS, media_root, storage_advice
+
+    root = media_root()
+    advice = storage_advice()
+    try:
+        for kind in MEDIA_KINDS.values():
+            (root / kind.folder).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _line(STATUS_FAIL, f"Media folder {root} is not writable", str(exc))
+
+    folders = ", ".join(sorted(kind.folder for kind in MEDIA_KINDS.values()))
+    if advice:
+        return _line(STATUS_WARN, f"Media saves to {root}", advice)
+    return _line(STATUS_OK, f"Media saves to {root}", f"folders: {folders}")
+
+
 def check_termux() -> bool:
     if shutil.which("termux-battery-status") is None:
         return _line(
@@ -200,6 +218,7 @@ def main() -> int:
         check_chat(settings),
         check_tool_calling(settings),
         check_multi_turn(settings),
+        check_media_storage(),
         check_termux(),
     ]
     print()

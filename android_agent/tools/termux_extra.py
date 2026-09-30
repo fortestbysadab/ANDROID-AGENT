@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
+import threading
 from collections.abc import Mapping
 from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
 from .files import _resolve_read_path
+from .media import PHOTO, RECORDING, new_media_path
 from .termux import _run
 
-_ARTIFACTS = os.path.expanduser("~/telegram_agent_v2/artifacts")
-_AUDIO_PATH = os.path.expanduser("~/telegram_agent_v2/recording.m4a")
+#: Path of the recording currently in progress, chosen when it starts so the
+#: filename carries the time the recording began.
+_recording_lock = threading.Lock()
+_recording_path: str | None = None
 
 
 def _json_command(command: list[str], summary: str, fields: tuple[str, ...] | None = None):
@@ -47,21 +50,123 @@ def _command(builder, success, *, timeout=15):
 
 def _camera(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     del context
-    os.makedirs(_ARTIFACTS, exist_ok=True)
-    fd, path = tempfile.mkstemp(prefix="photo-", suffix=".jpg", dir=_ARTIFACTS)
-    os.close(fd)
+    path = new_media_path(PHOTO)
     camera = "1" if arguments["camera"] == "front" else "0"
-    ok, output = _run(["termux-camera-photo", "-c", camera, path], timeout=25)
-    if not ok or not os.path.exists(path) or os.path.getsize(path) == 0:
+    ok, output = _run(["termux-camera-photo", "-c", camera, str(path)], timeout=25)
+    if not ok or not path.exists() or path.stat().st_size == 0:
         try:
-            os.remove(path)
+            path.unlink(missing_ok=True)
         except OSError:
             pass
-        return ToolResult.error(output or "Camera produced no image.", code="camera_error", retryable=True)
+        return ToolResult.error(
+            output or "Camera produced no image.", code="camera_error", retryable=True
+        )
     return ToolResult.ok(
-        "Photo captured.",
-        {"artifact_path": path, "artifact_name": "photo.jpg", "temporary_artifact": True},
+        f"Photo captured and saved as {path.name}.",
+        {
+            "artifact_path": str(path),
+            "artifact_name": path.name,
+            "saved_to": str(path),
+            "media_kind": "photo",
+        },
     )
+
+
+#: Loose international phone format. Digits, optional leading +, and the
+#: separators people actually type. Rejects anything else outright.
+PHONE_PATTERN = r"^\+?[0-9][0-9 ()\-\.]{2,24}$"
+
+
+def _normalise_number(raw: str) -> str:
+    """Strip formatting the dialer does not need, keeping a leading +."""
+    cleaned = raw.strip()
+    plus = cleaned.startswith("+")
+    digits = "".join(character for character in cleaned if character.isdigit())
+    return ("+" if plus else "") + digits
+
+
+def _place_call(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+    """Place a call, and be honest about whether it actually started.
+
+    `termux-telephony-call` frequently exits 0 while doing nothing:
+
+    * Termux:API lacks the CALL_PHONE runtime permission, or
+    * Android's background-activity-launch restrictions block the dialer
+      because Termux is not in the foreground.
+
+    The old implementation reported success on exit code 0 alone, so the
+    agent cheerfully claimed a call was placed when nothing happened. This
+    checks what it can and otherwise reports an explicit "unconfirmed".
+    """
+    del context
+    number = _normalise_number(str(arguments["number"]))
+    if not number.lstrip("+"):
+        return ToolResult.error("That is not a usable phone number.", code="invalid_number")
+
+    ok, output = _run(["termux-telephony-call", number], timeout=20)
+    lowered = output.lower()
+
+    if not ok:
+        if "permission" in lowered or "denied" in lowered:
+            return ToolResult.error(
+                "The call was refused: Termux:API does not have the Phone permission. "
+                "Open Android Settings > Apps > Termux:API > Permissions and allow Phone, "
+                "then try again.",
+                code="call_permission_denied",
+            )
+        if "not installed" in lowered:
+            return ToolResult.error(
+                "termux-telephony-call is missing. Install it with `pkg install termux-api` "
+                "and install the Termux:API app from F-Droid.",
+                code="termux_api_missing",
+            )
+        if "timed out" in lowered:
+            return ToolResult.error(
+                "The dialer did not respond. This usually means Termux is in the background; "
+                "Android blocks background apps from starting a call. Open Termux and retry.",
+                code="call_timeout",
+                retryable=True,
+            )
+        return ToolResult.error(
+            output or "The call could not be placed.", code="call_failed", retryable=True
+        )
+
+    # Exit code 0 is not proof. Confirm the radio actually left idle state.
+    state = _call_state()
+    if state in {"OFFHOOK", "RINGING"}:
+        return ToolResult.ok(
+            f"Calling {number} now.",
+            {"number": number, "call_state": state, "confirmed": True},
+        )
+    if state == "IDLE":
+        return ToolResult.error(
+            f"The dial request for {number} was accepted but no call started. "
+            "Android blocks calls from background apps: bring Termux to the foreground, "
+            "and check Termux:API has the Phone permission.",
+            code="call_not_started",
+            retryable=True,
+        )
+    return ToolResult.ok(
+        f"Dial request sent for {number}. I could not confirm the call started; "
+        "check your phone screen.",
+        {"number": number, "confirmed": False},
+    )
+
+
+def _call_state() -> str | None:
+    """Best-effort read of the telephony call state.
+
+    Returns IDLE, RINGING, OFFHOOK, or None when it cannot be determined.
+    """
+    ok, output = _run(["termux-telephony-deviceinfo"], timeout=10)
+    if not ok:
+        return None
+    try:
+        info = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    state = info.get("call_state") if isinstance(info, dict) else None
+    return str(state).upper() if isinstance(state, str) else None
 
 
 def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
@@ -99,29 +204,46 @@ def _clipboard_get(context: ToolContext, arguments: Mapping[str, Any]) -> ToolRe
 
 def _audio_start(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     del context, arguments
-    os.makedirs(os.path.dirname(_AUDIO_PATH), exist_ok=True)
+    global _recording_path
+    # Stop anything already running so the new file is clean.
     _run(["termux-microphone-record", "-q"], timeout=10)
-    try:
-        if os.path.exists(_AUDIO_PATH):
-            os.remove(_AUDIO_PATH)
-    except OSError as exc:
-        return ToolResult.error(str(exc), code="recording_error")
-    ok, output = _run(["termux-microphone-record", "-f", _AUDIO_PATH], timeout=10)
+    path = new_media_path(RECORDING)
+    ok, output = _run(["termux-microphone-record", "-f", str(path)], timeout=10)
     if not ok:
         return ToolResult.error(output, code="recording_error", retryable=True)
-    return ToolResult.ok("Microphone recording started. Ask me to stop recording when finished.")
+    with _recording_lock:
+        _recording_path = str(path)
+    return ToolResult.ok(
+        f"Microphone recording started, saving to {path.name}. "
+        "Ask me to stop recording when finished.",
+        {"saved_to": str(path), "media_kind": "recording"},
+    )
 
 
 def _audio_stop(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     del context, arguments
+    global _recording_path
+    with _recording_lock:
+        path = _recording_path
+        _recording_path = None
+
     ok, output = _run(["termux-microphone-record", "-q"], timeout=10)
     if not ok:
         return ToolResult.error(output, code="recording_error", retryable=True)
-    if not os.path.isfile(_AUDIO_PATH) or os.path.getsize(_AUDIO_PATH) == 0:
+    if path is None:
+        return ToolResult.error(
+            "No recording was in progress. Start one first.", code="recording_missing"
+        )
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
         return ToolResult.error("No non-empty recording was found.", code="recording_missing")
     return ToolResult.ok(
-        "Microphone recording stopped.",
-        {"artifact_path": _AUDIO_PATH, "artifact_name": "recording.m4a", "temporary_artifact": True},
+        f"Microphone recording stopped and saved as {os.path.basename(path)}.",
+        {
+            "artifact_path": path,
+            "artifact_name": os.path.basename(path),
+            "saved_to": path,
+            "media_kind": "recording",
+        },
     )
 
 
@@ -229,6 +351,6 @@ def extra_termux_tools() -> list[ToolSpec]:
         ToolSpec("search_contacts", "Search Android contacts by a partial person or contact name. Use only when the owner asks to find contact details. Results contain sensitive phone numbers and are limited to ten matches.", text_arg("query", 100), Risk.SENSITIVE_READ, _contacts, idempotent=True),
         ToolSpec("get_recent_sms", "Read up to five recent SMS inbox messages. Use only when the owner explicitly asks to inspect recent texts or the SMS inbox. Message sender and body are sensitive data.", no_args, Risk.SENSITIVE_READ, _json_command(["termux-sms-list", "-l", "5"], "Recent SMS messages retrieved."), idempotent=True),
         ToolSpec("get_notifications", "Read up to the currently active Android notifications. Use only when the owner asks to check notifications. Notification titles and content may contain sensitive data.", no_args, Risk.SENSITIVE_READ, _json_command(["termux-notification-list"], "Active notifications retrieved."), idempotent=True),
-        ToolSpec("place_phone_call", "Place a phone call to an exact number supplied by the owner. Use only when the owner explicitly asks to call that number. This external side effect requires confirmation before execution.", text_arg("number", 40), Risk.EXTERNAL_SIDE_EFFECT, _command(lambda a: ["termux-telephony-call", a["number"]], lambda a: f"Calling {a['number']}.")),
-        ToolSpec("send_sms", "Send an SMS to one exact phone number with exact message text. Use only when the owner explicitly asks to send the message, preserving destination and content. This external side effect requires confirmation before execution.", {"type": "object", "properties": {"number": {"type": "string", "minLength": 3, "maxLength": 40}, "message": {"type": "string", "minLength": 1, "maxLength": 1600}}, "required": ["number", "message"], "additionalProperties": False}, Risk.EXTERNAL_SIDE_EFFECT, _command(lambda a: ["termux-sms-send", "-n", a["number"], a["message"]], lambda a: f"SMS sent to {a['number']}.")),
+        ToolSpec("place_phone_call", "Place a phone call to an exact number supplied by the owner. Use only when the owner explicitly asks to call that number. This external side effect requires confirmation before execution.", {"type": "object", "properties": {"number": {"type": "string", "minLength": 3, "maxLength": 25, "pattern": PHONE_PATTERN}}, "required": ["number"], "additionalProperties": False}, Risk.EXTERNAL_SIDE_EFFECT, _place_call, timeout_seconds=35.0),
+        ToolSpec("send_sms", "Send an SMS to one exact phone number with exact message text. Use only when the owner explicitly asks to send the message, preserving destination and content. This external side effect requires confirmation before execution.", {"type": "object", "properties": {"number": {"type": "string", "minLength": 3, "maxLength": 25, "pattern": PHONE_PATTERN}, "message": {"type": "string", "minLength": 1, "maxLength": 1600}}, "required": ["number", "message"], "additionalProperties": False}, Risk.EXTERNAL_SIDE_EFFECT, _command(lambda a: ["termux-sms-send", "-n", a["number"], a["message"]], lambda a: f"SMS sent to {a['number']}.")),
     ]

@@ -92,6 +92,43 @@ provider reject the next request:
 Only one run executes per chat at a time; a second message while one is in
 flight is rejected rather than interleaved.
 
+## Captured media
+
+Photos, recordings and screenshots are **kept on the device**, filed by kind
+with a local-time stamp:
+
+```text
+/sdcard/AndroidAgent/
+├── photos
+│   ├── photo_29-09-2026_19-21-48.jpg
+│   └── photo_29-09-2026_20-08-21.jpg
+├── recordings
+│   ├── recording_29-09-2026_19-22-12.m4a
+│   └── recording_29-09-2026_20-08-39.m4a
+└── screenshots
+    ├── screenshot_29-09-2026_19-24-25.png
+    └── screenshot_29-09-2026_19-57-08.png
+```
+
+`/media` lists what has been captured, with counts and folder sizes.
+
+**Make it browsable.** By default the agent saves to shared storage so the
+files show up in your Gallery, Files app and over USB. That requires running
+`termux-setup-storage` once and granting the permission. Without it, media
+falls back to `~/telegram_agent_v2/media`, which works but lives inside
+Termux's private directory where no other app can see it. The bot logs a
+warning at startup when that happens, and `/media` repeats the advice.
+
+Set `ANDROID_AGENT_MEDIA_DIR` to override the location entirely.
+
+Photos are delivered twice: once as a Telegram photo for a quick look, and
+once as a document so the original resolution and the exact filename survive
+Telegram's recompression.
+
+Note that shared storage is world-readable to other apps on the device. If you
+would rather keep captures private, point `ANDROID_AGENT_MEDIA_DIR` at a path
+under Termux's home.
+
 ## Optional: on-device fast path with Needle
 
 [Needle](https://github.com/cactus-compute/needle) is a tiny (8-35 MB)
@@ -130,6 +167,21 @@ is bionic, so the prebuilt engine may not load. If it fails, the agent logs a
 warning and runs cloud-only; enabling the flag can never break the bot. For
 native Android builds see
 [`needle build --platform android-arm64`](https://cactuscompute.com/blog/needle-supported-devices).
+
+### Phone calls
+
+`termux-telephony-call` often exits 0 while doing nothing, so a naive
+implementation reports a call it never placed. Two causes:
+
+1. **Termux:API lacks the Phone permission.** Android Settings > Apps >
+   Termux:API > Permissions > Phone.
+2. **Termux is in the background.** Android blocks background apps from
+   starting a call. Bring Termux to the foreground and retry.
+
+The agent now confirms the call by reading the telephony call state after
+dialling, and reports `call_not_started` with the fix instead of a false
+success. Numbers are validated against a strict pattern and normalised before
+being passed as a single argv element.
 
 ### Troubleshooting
 

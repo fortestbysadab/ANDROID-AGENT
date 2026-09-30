@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from http.cookies import SimpleCookie
 from pathlib import Path
+from unittest import mock
 
 from android_agent.agent.runtime import AgentRuntime
 from android_agent.agent.session import SqliteSessionStore
@@ -103,6 +104,15 @@ class Client:
             if morsel and morsel.value:
                 self.cookie = morsel.value
         return status, payload
+
+    def head(self, path):
+        """Return response headers for an authenticated GET."""
+        req = urllib.request.Request(self.base + path, method="GET")
+        if self.cookie:
+            req.add_header("Cookie", f"{COOKIE_NAME}={self.cookie}")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            response.read()
+            return dict(response.headers)
 
     def login(self, token=TOKEN):
         return self.request("POST", "/api/login", {"token": token}, csrf=False)
@@ -521,6 +531,41 @@ class ApprovalTests(WebTestCase):
 
 
 class MediaTests(WebTestCase):
+    def _media_file(self, name="shot.png", body=b"\x89PNG\r\n\x1a\nfake"):
+        root = Path(self.tmp.name) / "media"
+        (root / "screenshots").mkdir(parents=True, exist_ok=True)
+        (root / "screenshots" / name).write_bytes(body)
+        patcher = mock.patch("android_agent.web.server.media_root", return_value=root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return name, body
+
+    def test_opening_a_media_file_in_a_new_tab_works(self):
+        """A tapped photo is a top-level navigation: no custom header exists."""
+        name, body = self._media_file()
+        self.client.login()
+        status, payload = self.client.request(
+            "GET", f"/api/media/file?name={name}", csrf=False
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["_raw"], body)
+
+    def test_media_file_still_requires_a_session(self):
+        name, _ = self._media_file()
+        status, payload = self.client.request(
+            "GET", f"/api/media/file?name={name}", csrf=False
+        )
+        self.assertEqual(status, 401)
+        self.assertNotIn("_raw", payload)
+
+    def test_media_file_is_served_inline_and_not_sniffable(self):
+        name, _ = self._media_file()
+        self.client.login()
+        headers = self.client.head(f"/api/media/file?name={name}")
+        self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertIn("inline", headers.get("Content-Disposition", ""))
+        self.assertEqual(headers.get("Content-Type"), "image/png")
+
     def test_traversal_attempts_are_refused(self):
         self.client.login()
         for name in ("../../etc/passwd", "..%2Fsecret", ".hidden", "", "a/b.png"):

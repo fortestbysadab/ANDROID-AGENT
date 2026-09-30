@@ -169,18 +169,117 @@ def _call_state() -> str | None:
     return str(state).upper() if isinstance(state, str) else None
 
 
-def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
-    del context
-    provider = arguments.get("provider", "network")
-    ok, output = _run(["termux-location", "-p", provider, "-r", "once"], timeout=25)
+#: How long each provider is given for a fresh fix. GPS needs far longer than
+#: people expect: a cold start routinely takes 60-75 seconds because the
+#: receiver has to download almanac data, and Termux cannot wake a sleeping
+#: GPS by itself. Network fixes come back in seconds when there is signal.
+_LOCATION_ONCE_TIMEOUTS = {"gps": 45.0, "network": 20.0, "passive": 8.0}
+#: A cached fix is either instant or useless, so it gets a short leash.
+_LOCATION_LAST_TIMEOUT = 8.0
+#: Anything older than this is reported as stale rather than passed off as now.
+_LOCATION_FRESH_SECONDS = 120.0
+
+_LOCATION_HELP = (
+    "No location fix. Check that the Termux:API app is installed, that it has "
+    "the Location permission (Settings > Apps > Termux:API > Permissions), and "
+    "that system location is switched on. Indoors, GPS often never gets a fix - "
+    "try provider 'network'."
+)
+
+
+def _location_read(provider: str, request: str, timeout: float):
+    """Run termux-location once and return parsed coordinates, or a reason.
+
+    termux-location has two failure modes that both look like success:
+    it can exit 0 with completely empty output, and it can return a JSON
+    object with an API_ERROR key. Treating either as data is how a caller
+    ends up reporting "invalid device data" for a simple missing permission.
+    """
+    ok, output = _run(["termux-location", "-p", provider, "-r", request], timeout=timeout)
     if not ok:
-        return ToolResult.error(output, code="location_error", retryable=True)
+        return None, output
+    if not output.strip():
+        return None, "no fix returned"
     try:
         data = json.loads(output)
-        result = {key: data.get(key) for key in ("latitude", "longitude", "accuracy", "altitude", "bearing") if key in data}
     except json.JSONDecodeError:
-        return ToolResult.error("Location service returned invalid data.", code="invalid_device_data")
-    return ToolResult.ok("Location retrieved.", result)
+        return None, "unreadable response"
+    if not isinstance(data, dict):
+        return None, "unexpected response shape"
+    if "API_ERROR" in data:
+        return None, str(data["API_ERROR"])
+    if not isinstance(data.get("latitude"), (int, float)) or not isinstance(
+        data.get("longitude"), (int, float)
+    ):
+        return None, "response had no coordinates"
+    return data, ""
+
+
+def _location_payload(data: Mapping[str, Any], provider: str, request: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        key: data[key]
+        for key in ("latitude", "longitude", "accuracy", "altitude", "bearing", "speed")
+        if isinstance(data.get(key), (int, float))
+    }
+    payload["provider"] = str(data.get("provider") or provider)
+    elapsed_ms = data.get("elapsedMs")
+    if isinstance(elapsed_ms, (int, float)):
+        age = float(elapsed_ms) / 1000.0
+        payload["fix_age_seconds"] = round(age, 1)
+        payload["stale"] = request == "last" and age > _LOCATION_FRESH_SECONDS
+    else:
+        payload["stale"] = request == "last"
+    return payload
+
+
+def _location_summary(payload: Mapping[str, Any]) -> str:
+    parts = [f"Location: {payload['latitude']:.5f}, {payload['longitude']:.5f}"]
+    accuracy = payload.get("accuracy")
+    if isinstance(accuracy, (int, float)):
+        parts.append(f"accurate to about {round(accuracy)} m")
+    parts.append(f"via {payload['provider']}")
+    if payload.get("stale"):
+        age = payload.get("fix_age_seconds")
+        when = f"{round(age / 60)} min old" if isinstance(age, (int, float)) else "cached"
+        parts.append(f"last known fix, {when}")
+    return " - ".join(parts) + "."
+
+
+def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+    """Get a position, preferring a fresh fix but never hanging forever.
+
+    Order of attempts: the requested provider fresh, then the other real
+    provider fresh, then any cached fix. A stale answer clearly labelled as
+    stale is far more useful than a timeout, which is what the previous
+    single 25-second `-r once` call produced on every cold start.
+    """
+    del context
+    requested = str(arguments.get("provider") or "network")
+    order = [requested] + [p for p in ("network", "gps") if p != requested]
+
+    failures: list[str] = []
+    for provider in order:
+        data, reason = _location_read(
+            provider, "once", _LOCATION_ONCE_TIMEOUTS.get(provider, 20.0)
+        )
+        if data is not None:
+            payload = _location_payload(data, provider, "once")
+            return ToolResult.ok(_location_summary(payload), payload)
+        failures.append(f"{provider}: {reason}")
+
+    # Nothing fresh. A cached fix still answers "roughly where is my phone".
+    for provider in ("network", "gps", "passive"):
+        data, reason = _location_read(provider, "last", _LOCATION_LAST_TIMEOUT)
+        if data is not None:
+            payload = _location_payload(data, provider, "last")
+            return ToolResult.ok(_location_summary(payload), payload)
+        failures.append(f"{provider} cached: {reason}")
+
+    return ToolResult.error(
+        f"{_LOCATION_HELP} Tried - " + "; ".join(failures),
+        code="location_unavailable",
+        retryable=True,
+    )
 
 
 def _sysinfo(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
@@ -331,7 +430,7 @@ def extra_termux_tools() -> list[ToolSpec]:
         return {"type": "object", "properties": {name: {"type": "string", "minLength": 1, "maxLength": maximum}}, "required": [name], "additionalProperties": False}
     return [
         ToolSpec("capture_photo", "Capture one photo with the Android camera and send it to Telegram. Use only when the owner explicitly asks to take a photo, selfie, or camera snapshot. Camera content is sensitive.", {"type": "object", "properties": {"camera": {"type": "string", "enum": ["front", "back"]}}, "required": ["camera"], "additionalProperties": False}, Risk.SENSITIVE_READ, _camera, timeout_seconds=30),
-        ToolSpec("get_location", "Get the Android device's current coordinates once. Use only when the owner explicitly asks where the device is or requests its location. This returns sensitive location data.", {"type": "object", "properties": {"provider": {"type": "string", "enum": ["network", "gps"]}}, "additionalProperties": False}, Risk.SENSITIVE_READ, _location, timeout_seconds=30, idempotent=True),
+        ToolSpec("get_location", "Get the Android device's current coordinates. Use only when the owner explicitly asks where the device is or requests its location. Prefer the default 'network' provider: it answers in seconds, while 'gps' is more precise but can take a minute outdoors and usually fails indoors. May take up to a minute; if no fresh fix is available it returns the last known position, flagged as stale. This returns sensitive location data.", {"type": "object", "properties": {"provider": {"type": "string", "enum": ["network", "gps", "passive"], "description": "Location source. 'network' (default) is fast and works indoors; 'gps' is precise but slow."}}, "additionalProperties": False}, Risk.SENSITIVE_READ, _location, timeout_seconds=90, idempotent=True),
         ToolSpec("get_system_info", "Read a snapshot of device memory, shared-storage usage, and uptime. Use for system health, RAM, storage, or uptime questions. This does not change the device.", no_args, Risk.READ_ONLY, _sysinfo, idempotent=True),
         ToolSpec("get_network_info", "Read local IPv4 interfaces and a concise current Wi-Fi network snapshot. Use when the owner asks about device IP addresses, network state, or connectivity. This does not contact a public IP service.", no_args, Risk.SENSITIVE_READ, _network_info, idempotent=True),
         ToolSpec("get_wifi_info", "Read details about the current Wi-Fi connection, including SSID, IP address, link speed, and signal strength. Use for questions about the active Wi-Fi network. This does not scan other networks.", no_args, Risk.SENSITIVE_READ, _json_command(["termux-wifi-connectioninfo"], "Wi-Fi information retrieved."), idempotent=True),

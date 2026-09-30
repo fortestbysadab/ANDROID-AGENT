@@ -205,6 +205,16 @@ class Handler(BaseHTTPRequestHandler):
     def _authenticated(self) -> bool:
         return self.app.auth.valid_session(self._session_id())
 
+    def _require_media_auth(self) -> bool:
+        """Auth + rate limit, without the custom-header requirement."""
+        if not self.app.auth.allow_request(self.client_identity()):
+            self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Rate limit exceeded."})
+            return False
+        if not self._authenticated():
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "Not signed in."})
+            return False
+        return True
+
     def _require_api_auth(self) -> bool:
         """Auth + CSRF + rate limit for every /api route except login."""
         if not self.app.auth.allow_request(self.client_identity()):
@@ -252,7 +262,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/media/file":
-            if not self._require_api_auth():
+            # Deliberately exempt from the custom-header check: this URL is
+            # opened as a top-level navigation (tapping a photo opens a tab)
+            # and a browser cannot attach a custom header to that. CSRF is not
+            # the relevant risk for a read anyway, and the SameSite=Strict
+            # cookie already stops another site from loading these bytes.
+            if not self._require_media_auth():
                 return
             self._serve_media(parse_qs(route.query).get("name", [""])[0])
             return
@@ -520,7 +535,18 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if candidate.is_file():
                 content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-                self._send(HTTPStatus.OK, candidate.read_bytes(), content_type)
+                self._send(
+                    HTTPStatus.OK,
+                    candidate.read_bytes(),
+                    content_type,
+                    {
+                        # Show it in the tab; never let the browser re-sniff a
+                        # photo into something executable.
+                        "Content-Disposition": f'inline; filename="{candidate.name}"',
+                        "X-Content-Type-Options": "nosniff",
+                        "Cache-Control": "private, max-age=300",
+                    },
+                )
                 return
         self._json(HTTPStatus.NOT_FOUND, {"error": "Not found."})
 

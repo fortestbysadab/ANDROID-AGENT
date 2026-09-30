@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from android_agent.agent.runtime import AgentRuntime, RunStatus, RuntimeLimits
@@ -144,3 +145,71 @@ class RuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditDiagnosticsTests(unittest.TestCase):
+    """A failed tool must record why, not merely that it failed.
+
+    Every diagnosis of a device problem so far has been inference from the
+    outside, because "status: error" carries no cause. Error codes are fixed
+    identifiers, not free text and not arguments, so recording them adds no
+    exposure of device content.
+    """
+
+    def _run_with(self, result):
+        audit = MemoryAuditSink()
+        probe = ToolSpec(
+            name="probe",
+            description="Probe the device.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            risk=Risk.READ_ONLY,
+            handler=lambda context, arguments: result,
+            timeout_seconds=1,
+        )
+        runtime = AgentRuntime(
+            planner=FakePlanner(
+                PlannerResponse(tool_calls=(ToolCall("c1", "probe", {}),)),
+                PlannerResponse(text="done"),
+            ),
+            registry=ToolRegistry([probe]),
+            policy=DefaultPolicy("42"),
+            system_prompt="Use tools when needed.",
+            audit=audit,
+        )
+        runtime.run("probe it", actor_id="42", chat_id=42)
+        return [event for event in audit.events if str(event["event"]).startswith("tool.")]
+
+    def test_failure_records_the_error_code(self):
+        events = self._run_with(
+            ToolResult.error("boom", code="location_unavailable", retryable=True)
+        )
+        failed = [event for event in events if event["event"] == "tool.failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["error_code"], "location_unavailable")
+        self.assertTrue(failed[0]["retryable"])
+
+    def test_the_default_code_is_recorded_when_a_tool_names_none(self):
+        events = self._run_with(ToolResult.error("boom"))
+        failed = [event for event in events if event["event"] == "tool.failed"]
+        self.assertEqual(failed[0]["error_code"], "tool_error")
+
+    def test_a_missing_code_still_audits_as_unspecified(self):
+        """Defensive: ToolResult can be constructed directly, bypassing error()."""
+        events = self._run_with(ToolResult("error", "boom", {}, False, None))
+        failed = [event for event in events if event["event"] == "tool.failed"]
+        self.assertEqual(failed[0]["error_code"], "unspecified")
+
+    def test_success_records_no_error_fields(self):
+        events = self._run_with(ToolResult.ok("fine", {}))
+        completed = [event for event in events if event["event"] == "tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertNotIn("error_code", completed[0])
+
+    def test_the_human_summary_is_not_audited(self):
+        """Summaries can quote device content; codes cannot."""
+        events = self._run_with(
+            ToolResult.error("Contact Alice on +91 90000 00000", code="invalid_arguments")
+        )
+        failed = [event for event in events if event["event"] == "tool.failed"]
+        self.assertNotIn("Alice", json.dumps(failed[0]))
+        self.assertNotIn("90000", json.dumps(failed[0]))

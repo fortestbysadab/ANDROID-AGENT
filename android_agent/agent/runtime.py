@@ -207,11 +207,27 @@ class AgentRuntime:
             return ToolResult.error("Approval arguments did not match.", code="approval_mismatch")
         self.audit.emit("approval.executing", {"run_id": approval_run_id, "tool": tool.name})
         result = _execute_with_timeout(tool.handler, context, arguments, tool.timeout_seconds)
-        self.audit.emit(
-            "tool.completed" if result.status == "ok" else "tool.failed",
-            {"run_id": approval_run_id, "tool": tool.name, "status": result.status},
-        )
+        self._record_outcome(approval_run_id, tool.name, result)
         return result
+
+    def _record_outcome(self, run_id: str, tool_name: str, result: ToolResult) -> None:
+        """Audit a tool outcome, including *why* it failed.
+
+        The error code is recorded because "status: error" alone forces every
+        later diagnosis to be guesswork from the outside. Codes are fixed
+        identifiers chosen by the tool, never free text and never arguments,
+        so this adds no new exposure of user data. The human-readable summary
+        is deliberately still excluded: it can quote device content.
+        """
+        failed = result.status != "ok"
+        event: dict[str, Any] = {"run_id": run_id, "tool": tool_name, "status": result.status}
+        if failed:
+            event["error_code"] = result.error_code or "unspecified"
+            event["retryable"] = bool(result.retryable)
+            logger.warning(
+                "Tool %s failed on run %s: %s", tool_name, run_id, event["error_code"]
+            )
+        self.audit.emit("tool.failed" if failed else "tool.completed", event)
 
     def _process_call(
         self, context: ToolContext, call: ToolCall
@@ -260,10 +276,7 @@ class AgentRuntime:
 
         self.audit.emit("tool.started", {"run_id": context.run_id, "tool": tool.name})
         result = _execute_with_timeout(tool.handler, context, arguments, tool.timeout_seconds)
-        self.audit.emit(
-            "tool.completed" if result.status == "ok" else "tool.failed",
-            {"run_id": context.run_id, "tool": tool.name, "status": result.status},
-        )
+        self._record_outcome(context.run_id, tool.name, result)
         return result, None
 
     def _budget_outcome(

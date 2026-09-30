@@ -340,7 +340,13 @@ being passed as a single argv element.
 
 `python -m android_agent.doctor` checks configuration, endpoint reachability, credentials, model availability, schema sanitisation, a live tool-calling round trip, and `termux-api` presence. Logs are written to `~/telegram_agent_v2/agent.log`.
 
-Audit metadata is written to `~/telegram_agent_v2/audit.jsonl`. Tool arguments and secrets are not included in these initial events.
+Audit metadata is written to `~/telegram_agent_v2/audit.jsonl`. Tool arguments and secrets are never included. Failed tool calls record their `error_code` and `retryable` flag so a failure can be diagnosed after the fact without reproducing it; the human-readable summary is excluded because it can quote device content. To see why a tool failed:
+
+```sh
+grep '"event": "tool.failed"' ~/telegram_agent_v2/audit.jsonl | tail -20
+grep -iE 'termux-|timed out|exited' ~/telegram_agent_v2/agent.log | tail -40
+```
+
 
 ## Test
 

@@ -28,7 +28,7 @@ class SkillRouter:
         self.skills = self._load()
 
     @classmethod
-    def bundled(cls) -> "SkillRouter":
+    def bundled(cls) -> SkillRouter:
         return cls(Path(__file__).with_name("bundled"))
 
     def instructions_for(self, user_text: str) -> str:

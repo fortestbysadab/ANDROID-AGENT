@@ -1,1 +1,4 @@
+# Runtime dependencies for the v2 agent (agent_bot.py).
+# The model adapter deliberately uses only the standard library so Termux
+# installs stay small and offline-friendly.
 pyTelegramBotAPI>=4.20,<5

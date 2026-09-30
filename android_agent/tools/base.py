@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any
 
 
 class Risk(str, Enum):
@@ -35,13 +36,13 @@ class ToolResult:
     error_code: str | None = None
 
     @classmethod
-    def ok(cls, summary: str, data: Mapping[str, Any] | None = None) -> "ToolResult":
+    def ok(cls, summary: str, data: Mapping[str, Any] | None = None) -> ToolResult:
         return cls("ok", summary, data or {})
 
     @classmethod
     def error(
         cls, summary: str, *, code: str = "tool_error", retryable: bool = False
-    ) -> "ToolResult":
+    ) -> ToolResult:
         return cls("error", summary, {}, retryable, code)
 
     def as_dict(self) -> dict[str, Any]:
@@ -80,7 +81,8 @@ class ToolSpec:
         if not isinstance(arguments, Mapping):
             raise SchemaValidationError("arguments must be an object")
         value = _validate_value(dict(arguments), self.input_schema, "arguments")
-        assert isinstance(value, dict)
+        if not isinstance(value, dict):
+            raise SchemaValidationError("arguments must validate to an object")
         return value
 
     def model_schema(self) -> dict[str, Any]:

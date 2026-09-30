@@ -7,7 +7,6 @@ from android_agent.policy.engine import DefaultPolicy
 from android_agent.tools.base import Risk, ToolResult, ToolSpec
 from android_agent.tools.registry import ToolRegistry
 
-
 SCHEMA = {
     "type": "object",
     "properties": {"level": {"type": "integer", "minimum": 0, "maximum": 15}},

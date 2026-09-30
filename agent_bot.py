@@ -8,9 +8,12 @@ private chat.
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import telebot
 from telebot import types
@@ -20,10 +23,13 @@ from android_agent.approvals.store import InMemoryApprovalStore
 from android_agent.config import Settings
 from android_agent.models.openai_compatible import OpenAICompatiblePlanner
 from android_agent.observability.audit import JsonlAuditSink
+from android_agent.observability.logging import configure_logging
 from android_agent.policy.engine import DefaultPolicy
 from android_agent.skills.loader import SkillRouter
 from android_agent.tools.base import ToolResult
 from android_agent.tools.catalog import build_full_registry
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
 You are an Android device assistant controlled by its owner through Telegram.
@@ -46,6 +52,8 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             api_key=settings.llm_api_key,
+            dialect=settings.llm_dialect,
+            timeout_seconds=settings.request_timeout_seconds,
         ),
         registry=build_full_registry(),
         policy=DefaultPolicy(str(settings.owner_chat_id)),
@@ -114,7 +122,12 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
     def status(message):
         bot.reply_to(
             message,
-            f"Agent runtime: online\nModel: {settings.llm_model}\nTools: {len(runtime.registry)}",
+            "Agent runtime: online\n"
+            f"Model: {settings.llm_model}\n"
+            f"Provider dialect: {settings.llm_dialect.value}\n"
+            f"Endpoint: {settings.llm_base_url}\n"
+            f"Tools: {len(runtime.registry)}\n"
+            f"Skills: {len(runtime.skill_router.skills) if runtime.skill_router else 0}",
         )
 
     @bot.message_handler(commands=["tools"], func=lambda message: getattr(message, "_authorized", False))
@@ -156,6 +169,8 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
                     reply_markup=keyboard,
                 )
             return
+        if outcome.status is RunStatus.FAILED and outcome.error:
+            logger.error("Run %s failed: %s", outcome.run_id, outcome.error)
         bot.reply_to(message, outcome.text[:4000])
         for result in outcome.tool_results:
             send_artifacts(message.chat.id, result)
@@ -206,16 +221,24 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
 
 
 def main() -> None:
-    settings = Settings.from_env()
+    try:
+        settings = Settings.from_env()
+    except ValueError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        print("Run `python -m android_agent.doctor` for a full diagnosis.", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    configure_logging(settings.log_level)
+    logger.info("Starting Android Agent v2 with config: %s", settings.redacted())
     bot = build_bot(settings)
-    print("Android Agent v2 is running...")
+    logger.info("Android Agent v2 is polling")
     while True:
         try:
             bot.infinity_polling(timeout=30, long_polling_timeout=30, skip_pending=True)
         except KeyboardInterrupt:
             raise
-        except Exception as exc:
-            print(f"Polling failed ({type(exc).__name__}); retrying in 5 seconds")
+        except Exception:
+            logger.exception("Polling failed; retrying in 5 seconds")
             time.sleep(5)
 
 

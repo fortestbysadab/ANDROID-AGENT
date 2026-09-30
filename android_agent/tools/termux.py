@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
 from .registry import ToolRegistry
@@ -21,8 +22,7 @@ def _run(args: list[str], timeout: float = 12.0) -> tuple[bool, str]:
         completed = subprocess.run(
             args,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
             check=False,
         )

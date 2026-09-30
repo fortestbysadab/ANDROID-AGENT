@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
 from .files import _resolve_read_path
@@ -204,7 +205,8 @@ def _contacts(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
 
 def extra_termux_tools() -> list[ToolSpec]:
     no_args = {"type": "object", "properties": {}, "additionalProperties": False}
-    text_arg = lambda name, maximum=1000: {"type": "object", "properties": {name: {"type": "string", "minLength": 1, "maxLength": maximum}}, "required": [name], "additionalProperties": False}
+    def text_arg(name, maximum=1000):
+        return {"type": "object", "properties": {name: {"type": "string", "minLength": 1, "maxLength": maximum}}, "required": [name], "additionalProperties": False}
     return [
         ToolSpec("capture_photo", "Capture one photo with the Android camera and send it to Telegram. Use only when the owner explicitly asks to take a photo, selfie, or camera snapshot. Camera content is sensitive.", {"type": "object", "properties": {"camera": {"type": "string", "enum": ["front", "back"]}}, "required": ["camera"], "additionalProperties": False}, Risk.SENSITIVE_READ, _camera, timeout_seconds=30),
         ToolSpec("get_location", "Get the Android device's current coordinates once. Use only when the owner explicitly asks where the device is or requests its location. This returns sensitive location data.", {"type": "object", "properties": {"provider": {"type": "string", "enum": ["network", "gps"]}}, "additionalProperties": False}, Risk.SENSITIVE_READ, _location, timeout_seconds=30, idempotent=True),

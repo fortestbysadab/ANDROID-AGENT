@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from android_agent.models.base import Planner, PlannerResponse, ToolCall
 from android_agent.observability.audit import AuditSink, NullAuditSink
@@ -16,6 +19,8 @@ from android_agent.policy.engine import Policy, PolicyDecision
 from android_agent.skills.loader import SkillRouter
 from android_agent.tools.base import SchemaValidationError, ToolContext, ToolResult
 from android_agent.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class RunStatus(str, Enum):
@@ -41,6 +46,7 @@ class RunOutcome:
     tool_results: tuple[ToolResult, ...] = ()
     pending_approvals: tuple[PendingApproval, ...] = ()
     messages: tuple[Mapping[str, Any], ...] = ()
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,16 +108,23 @@ class AgentRuntime:
             try:
                 response = self.planner.complete(messages, self.registry.model_schemas())
             except Exception as exc:
+                logger.exception("Planner call failed on run %s turn %d", run_id, turn + 1)
                 self.audit.emit(
                     "run.failed",
-                    {"run_id": run_id, "reason": "planner_error", "error_type": type(exc).__name__},
+                    {
+                        "run_id": run_id,
+                        "reason": "planner_error",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:500],
+                    },
                 )
                 return RunOutcome(
                     run_id,
                     RunStatus.FAILED,
-                    "The agent brain is temporarily unavailable.",
+                    _planner_failure_text(exc),
                     tuple(results),
                     messages=tuple(messages),
+                    error=f"{type(exc).__name__}: {exc}",
                 )
 
             self.audit.emit(
@@ -146,7 +159,8 @@ class AgentRuntime:
                 if approval is not None:
                     approvals.append(approval)
                     continue
-                assert result is not None
+                if result is None:  # defensive: _process_call always returns one or the other
+                    raise RuntimeError("tool processing returned neither result nor approval")
                 results.append(result)
                 messages.append(_tool_message(call, result))
 
@@ -267,6 +281,21 @@ class AgentRuntime:
             tuple(results),
             messages=tuple(messages),
         )
+
+
+def _planner_failure_text(exc: Exception) -> str:
+    """Owner-facing explanation of a planner failure.
+
+    The bot is single-owner, so a precise diagnostic is more useful than a
+    vague apology. Secrets never reach this path: the planner keeps the API
+    key in headers and out of exception text.
+    """
+    remedy = getattr(exc, "remedy", "")
+    detail = str(exc).strip() or type(exc).__name__
+    lines = ["I could not reach the model.", "", f"Reason: {detail[:600]}"]
+    if remedy:
+        lines += ["", f"Fix: {remedy}"]
+    return "\n".join(lines)
 
 
 def _assistant_message(response: PlannerResponse) -> dict[str, Any]:

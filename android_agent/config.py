@@ -1,9 +1,40 @@
-"""Environment-only settings for the clean v2 agent."""
+"""Validated, environment-only settings for the v2 agent."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from android_agent.models.compat import Dialect
+
+#: Endpoints that are easy to get wrong, keyed by a friendly provider name.
+KNOWN_ENDPOINTS = {
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "openai": "https://api.openai.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
+
+
+def load_dotenv(path: str | os.PathLike[str] = ".env") -> None:
+    """Populate os.environ from a .env file without overwriting real values.
+
+    Kept dependency-free on purpose: Termux installs should not need extra
+    wheels just to read five variables.
+    """
+    candidate = Path(path)
+    if not candidate.is_file():
+        return
+    for line in candidate.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 @dataclass(frozen=True)
@@ -13,13 +44,23 @@ class Settings:
     llm_base_url: str
     llm_model: str
     llm_api_key: str | None
+    llm_dialect: Dialect
+    log_level: str = "INFO"
+    request_timeout_seconds: float = 60.0
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
+        load_dotenv()
+
         token = os.environ.get("ANDROID_AGENT_BOT_TOKEN", "").strip()
         owner = os.environ.get("ANDROID_AGENT_OWNER_CHAT_ID", "").strip()
         base_url = os.environ.get("ANDROID_AGENT_LLM_BASE_URL", "").strip()
         model = os.environ.get("ANDROID_AGENT_LLM_MODEL", "").strip()
+
+        # Convenience: allow a provider alias instead of a full URL.
+        if base_url.lower() in KNOWN_ENDPOINTS:
+            base_url = KNOWN_ENDPOINTS[base_url.lower()]
+
         missing = [
             name
             for name, value in (
@@ -32,14 +73,57 @@ class Settings:
         ]
         if missing:
             raise ValueError("Missing required environment variables: " + ", ".join(missing))
+
         try:
             owner_id = int(owner)
         except ValueError as exc:
             raise ValueError("ANDROID_AGENT_OWNER_CHAT_ID must be an integer") from exc
+
+        configured_dialect = os.environ.get("ANDROID_AGENT_LLM_DIALECT", "").strip().lower()
+        if configured_dialect:
+            try:
+                dialect = Dialect(configured_dialect)
+            except ValueError as exc:
+                valid = ", ".join(item.value for item in Dialect)
+                raise ValueError(
+                    f"ANDROID_AGENT_LLM_DIALECT must be one of: {valid}"
+                ) from exc
+        else:
+            dialect = Dialect.detect(base_url)
+
+        timeout_raw = os.environ.get("ANDROID_AGENT_LLM_TIMEOUT", "60").strip()
+        try:
+            timeout = float(timeout_raw)
+        except ValueError as exc:
+            raise ValueError("ANDROID_AGENT_LLM_TIMEOUT must be a number") from exc
+        if timeout <= 0:
+            raise ValueError("ANDROID_AGENT_LLM_TIMEOUT must be positive")
+
+        api_key = (os.environ.get("ANDROID_AGENT_LLM_API_KEY") or "").strip() or None
+        if dialect is Dialect.GEMINI and not api_key:
+            raise ValueError(
+                "ANDROID_AGENT_LLM_API_KEY is required for the Gemini endpoint"
+            )
+
         return cls(
             telegram_bot_token=token,
             owner_chat_id=owner_id,
             llm_base_url=base_url,
             llm_model=model,
-            llm_api_key=os.environ.get("ANDROID_AGENT_LLM_API_KEY") or None,
+            llm_api_key=api_key,
+            llm_dialect=dialect,
+            log_level=os.environ.get("ANDROID_AGENT_LOG_LEVEL", "INFO").strip() or "INFO",
+            request_timeout_seconds=timeout,
         )
+
+    def redacted(self) -> dict[str, object]:
+        """A safe-to-print view of the configuration."""
+        return {
+            "owner_chat_id": self.owner_chat_id,
+            "llm_base_url": self.llm_base_url,
+            "llm_model": self.llm_model,
+            "llm_dialect": self.llm_dialect.value,
+            "llm_api_key": "set" if self.llm_api_key else "absent",
+            "telegram_bot_token": "set" if self.telegram_bot_token else "absent",
+            "log_level": self.log_level,
+        }

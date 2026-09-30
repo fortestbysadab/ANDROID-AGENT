@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 
 class AuditSink(Protocol):

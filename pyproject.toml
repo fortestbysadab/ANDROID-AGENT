@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "android-agent"
+version = "2.0.0"
+description = "Telegram-controlled Android/Termux agent with deterministic policy enforcement"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pyTelegramBotAPI>=4.20,<5"]
+
+[project.scripts]
+android-agent = "agent_bot:main"
+android-agent-doctor = "android_agent.doctor:main"
+
+[tool.setuptools]
+packages = ["android_agent"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "RUF"]
+# S310: urlopen is intentional; the adapter is stdlib-only by design.
+# S311: random is used only for retry jitter, never for tokens.
+ignore = ["S603", "S607", "S310", "S311", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -7,7 +7,8 @@ import re
 import shlex
 import subprocess
 import tempfile
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
 
@@ -17,8 +18,7 @@ def _run(args: list[str], timeout: float = 15) -> tuple[bool, str]:
         result = subprocess.run(
             args,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
             check=False,
         )
@@ -127,7 +127,8 @@ def _screenshot(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResul
 
 def adb_tools() -> list[ToolSpec]:
     no_args = {"type": "object", "properties": {}, "additionalProperties": False}
-    integer = lambda minimum, maximum: {"type": "integer", "minimum": minimum, "maximum": maximum}
+    def integer(minimum, maximum):
+        return {"type": "integer", "minimum": minimum, "maximum": maximum}
     key_names = ["home", "back", "recents", "power", "volume_up", "volume_down", "enter", "delete", "play", "pause"]
     key_codes = {"home": 3, "back": 4, "recents": 187, "power": 26, "volume_up": 24, "volume_down": 25, "enter": 66, "delete": 67, "play": 126, "pause": 127}
     return [

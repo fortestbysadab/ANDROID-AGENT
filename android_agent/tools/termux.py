@@ -7,6 +7,8 @@ No generic shell capability is exposed.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 from collections.abc import Mapping
 from typing import Any
@@ -17,26 +19,54 @@ from .registry import ToolRegistry
 _MAX_OUTPUT = 64 * 1024
 
 
+def _kill_group(process: subprocess.Popen) -> None:
+    """Kill the whole process group, not just the script we launched.
+
+    A termux-* command is a shell wrapper that starts the `termux-api` helper
+    and an `am broadcast`. Killing only the wrapper leaves the helper holding
+    the LocalSocket that the Termux:API app writes its answer back to. When
+    the app then tries to deliver, it hits "java.io.IOException: Connection
+    refused" and throws a full-screen Termux:API Error at the user. Killing
+    the group takes the helper with it, so there is no orphan left listening.
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        process.kill()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _run(args: list[str], timeout: float = 12.0) -> tuple[bool, str]:
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # Own process group, so a timeout can take down the helper too.
+            start_new_session=True,
         )
     except FileNotFoundError:
         return False, f"{args[0]} is not installed"
-    except subprocess.TimeoutExpired:
-        return False, f"{args[0]} timed out"
     except OSError as exc:
         return False, f"{args[0]} failed: {type(exc).__name__}"
 
-    stdout = completed.stdout[:_MAX_OUTPUT].decode("utf-8", "replace").strip()
-    stderr = completed.stderr[:2048].decode("utf-8", "replace").strip()
-    if completed.returncode != 0:
-        return False, stderr or stdout or f"command exited {completed.returncode}"
+    try:
+        raw_out, raw_err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(process)
+        return False, f"{args[0]} timed out after {timeout:.0f}s"
+    except OSError as exc:
+        _kill_group(process)
+        return False, f"{args[0]} failed: {type(exc).__name__}"
+
+    stdout = (raw_out or b"")[:_MAX_OUTPUT].decode("utf-8", "replace").strip()
+    stderr = (raw_err or b"")[:2048].decode("utf-8", "replace").strip()
+    if process.returncode != 0:
+        return False, stderr or stdout or f"command exited {process.returncode}"
     return True, stdout
 
 

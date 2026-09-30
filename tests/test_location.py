@@ -42,52 +42,49 @@ class FakeTermux:
     def __init__(self, responses):
         self.responses = responses
         self.calls: list[tuple[str, str, float]] = []
+        self.active = 0
+        self.max_concurrent = 0
 
     def __call__(self, args, timeout=12.0):
         provider, request = args[2], args[4]
-        self.calls.append((provider, request, timeout))
-        reply = self.responses.get((provider, request), (True, ""))
-        return reply(self) if callable(reply) else reply
+        self.active += 1
+        self.max_concurrent = max(self.max_concurrent, self.active)
+        try:
+            self.calls.append((provider, request, timeout))
+            reply = self.responses.get((provider, request), (True, ""))
+            return reply(self) if callable(reply) else reply
+        finally:
+            self.active -= 1
 
 
-class _Patched:
-    """Patch the Termux shell-out and, by default, disable the IP fallback.
-
-    Tests must never reach the network: the IP estimate is a separate concern
-    with its own tests below.
-    """
-
-    def __init__(self, responses, ip=None):
-        self.fake = FakeTermux(responses)
-        self.patchers = [
-            mock.patch.object(termux_extra, "_run", self.fake),
-            mock.patch.object(termux_extra, "ip_location", lambda: ip),
-        ]
-
-    def __enter__(self):
-        for patcher in self.patchers:
-            patcher.start()
-        return self.fake
-
-    def __exit__(self, *exc):
-        for patcher in reversed(self.patchers):
-            patcher.stop()
-        return False
-
-
-def patched(responses, ip=None):
-    return _Patched(responses, ip)
+def patched(responses):
+    return mock.patch.object(termux_extra, "_run", FakeTermux(responses))
 
 
 class LocationSuccessTests(unittest.TestCase):
-    def test_fresh_network_fix_is_returned(self):
-        with patched({("network", "once"): (True, json.dumps(FIX))}) as fake:
+    def test_gps_is_asked_first(self):
+        gps = dict(FIX, provider="gps", accuracy=8.0)
+        with patched({("gps", "once"): (True, json.dumps(gps))}) as fake:
             result = run()
         self.assertEqual(result.status, "ok")
-        self.assertAlmostEqual(result.data["latitude"], 22.5726)
+        self.assertEqual(result.data["provider"], "gps")
+        self.assertEqual(fake.calls[0][0], "gps")
+
+    def test_a_good_gps_fix_stops_there_and_never_touches_the_network(self):
+        """One request at a time is what keeps Termux:API from erroring."""
+        gps = dict(FIX, provider="gps", accuracy=8.0)
+        with patched({("gps", "once"): (True, json.dumps(gps))}) as fake:
+            run()
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_network_is_used_only_when_gps_gives_nothing(self):
+        with patched({
+            ("gps", "once"): (True, ""),
+            ("network", "once"): (True, json.dumps(FIX)),
+        }) as fake:
+            result = run()
         self.assertEqual(result.data["provider"], "network")
-        self.assertFalse(result.data["stale"])
-        self.assertEqual(fake.calls[0][0], "network")
+        self.assertEqual([call[0] for call in fake.calls], ["gps", "network"])
 
     def test_summary_is_human_readable(self):
         with patched({("network", "once"): (True, json.dumps(FIX))}):
@@ -96,37 +93,35 @@ class LocationSuccessTests(unittest.TestCase):
         self.assertIn("18 m", result.summary)
         self.assertIn("network", result.summary)
 
-    def test_requested_provider_is_tried_first(self):
-        gps = dict(FIX, provider="gps")
-        with patched({("gps", "once"): (True, json.dumps(gps))}) as fake:
-            result = run({"provider": "gps"})
-        self.assertEqual(result.data["provider"], "gps")
-        self.assertEqual(fake.calls[0][0], "gps")
+    def test_requested_provider_is_used_alone(self):
+        with patched({("network", "once"): (True, json.dumps(FIX))}) as fake:
+            result = run({"provider": "network"})
+        self.assertEqual(result.data["provider"], "network")
+        self.assertEqual({call[0] for call in fake.calls}, {"network"})
 
     def test_gps_gets_a_longer_budget_than_network(self):
-        with patched({("gps", "once"): (True, json.dumps(FIX))}) as fake:
-            run({"provider": "gps"})
-        gps_timeout = fake.calls[0][2]
-        with patched({("network", "once"): (True, json.dumps(FIX))}) as fake:
-            run({"provider": "network"})
-        self.assertGreater(gps_timeout, fake.calls[0][2])
+        plan = dict(termux_extra._LOCATION_PLAN["balanced"])
+        self.assertGreater(plan["gps"], plan["network"])
 
-    def test_tool_timeout_exceeds_the_worst_case_provider_budget(self):
+    def test_tool_timeout_exceeds_the_worst_case_plan(self):
         """A tool killed by the runtime mid-fix would waste the whole wait."""
-        worst = max(termux_extra._LOCATION_ONCE_TIMEOUTS.values())
+        worst = max(
+            sum(seconds for _, seconds in plan)
+            for plan in termux_extra._LOCATION_PLAN.values()
+        )
         self.assertGreater(spec().timeout_seconds, worst)
 
 
 class LocationFallbackTests(unittest.TestCase):
     def test_falls_back_to_the_other_provider(self):
         with patched({
-            ("network", "once"): (False, "termux-location timed out"),
-            ("gps", "once"): (True, json.dumps(dict(FIX, provider="gps"))),
+            ("gps", "once"): (False, "termux-location timed out after 25s"),
+            ("network", "once"): (True, json.dumps(FIX)),
         }) as fake:
             result = run()
         self.assertEqual(result.status, "ok")
-        self.assertEqual(result.data["provider"], "gps")
-        self.assertEqual([c[0] for c in fake.calls], ["network", "gps"])
+        self.assertEqual(result.data["provider"], "network")
+        self.assertEqual([c[0] for c in fake.calls], ["gps", "network"])
 
     def test_falls_back_to_a_cached_fix_and_flags_it_stale(self):
         cached = dict(FIX, elapsedMs=15 * 60 * 1000)
@@ -156,8 +151,8 @@ class LocationFallbackTests(unittest.TestCase):
 
     def test_fresh_fix_is_preferred_over_cache(self):
         with patched({
-            ("network", "once"): (True, json.dumps(FIX)),
-            ("network", "last"): (True, json.dumps(dict(FIX, latitude=0.0))),
+            ("gps", "once"): (True, json.dumps(dict(FIX, accuracy=8.0))),
+            ("gps", "last"): (True, json.dumps(dict(FIX, latitude=0.0))),
         }) as fake:
             result = run()
         self.assertAlmostEqual(result.data["latitude"], 22.5726)
@@ -185,18 +180,20 @@ class LocationAccuracyTests(unittest.TestCase):
         self.assertEqual(result.data["accuracy"], 12.0)
         self.assertFalse(result.data["approximate"])
 
-    def test_both_providers_are_asked_at_once(self):
+    def test_providers_are_never_queried_concurrently(self):
+        """Overlapping termux-location calls make Termux:API fail to deliver."""
         with patched({
+            ("gps", "once"): (True, json.dumps(self.COARSE)),
             ("network", "once"): (True, json.dumps(self.COARSE)),
-            ("gps", "once"): (True, json.dumps(self.FINE)),
         }) as fake:
             run()
-        self.assertEqual({c[0] for c in fake.calls}, {"network", "gps"})
+        self.assertGreaterEqual(len(fake.calls), 2)
+        self.assertEqual(fake.max_concurrent, 1)
 
     def test_a_coarse_fix_is_still_returned_when_it_is_all_there_is(self):
         with patched({
-            ("network", "once"): (True, json.dumps(self.COARSE)),
             ("gps", "once"): (True, ""),
+            ("network", "once"): (True, json.dumps(self.COARSE)),
         }):
             result = run()
         self.assertEqual(result.status, "ok")
@@ -204,8 +201,8 @@ class LocationAccuracyTests(unittest.TestCase):
 
     def test_a_coarse_fix_says_so_in_kilometres(self):
         with patched({
-            ("network", "once"): (True, json.dumps(self.COARSE)),
             ("gps", "once"): (True, ""),
+            ("network", "once"): (True, json.dumps(self.COARSE)),
         }):
             summary = run().summary
         self.assertIn("2.1 km", summary)
@@ -221,8 +218,8 @@ class LocationAccuracyTests(unittest.TestCase):
     def test_fix_without_stated_accuracy_counts_as_approximate(self):
         blind = {k: v for k, v in FIX.items() if k != "accuracy"}
         with patched({
-            ("network", "once"): (True, json.dumps(blind)),
             ("gps", "once"): (True, ""),
+            ("network", "once"): (True, json.dumps(blind)),
         }):
             result = run()
         self.assertTrue(result.data["approximate"])
@@ -236,22 +233,25 @@ class LocationAccuracyTests(unittest.TestCase):
         self.assertEqual({c[0] for c in fake.calls}, {"network"})
         self.assertEqual(result.data["provider"], "network")
 
-    def test_precision_levels_set_different_budgets(self):
-        fast = termux_extra._LOCATION_PRECISION["fast"]
-        balanced = termux_extra._LOCATION_PRECISION["balanced"]
-        precise = termux_extra._LOCATION_PRECISION["precise"]
-        self.assertLess(fast[1], balanced[1])
-        self.assertLess(balanced[1], precise[1])
-        # Tighter accuracy target the longer we are willing to wait.
-        self.assertGreater(fast[0], balanced[0])
-        self.assertGreater(balanced[0], precise[0])
+    def test_precision_levels_give_gps_different_budgets(self):
+        budgets = {
+            name: dict(plan)["gps"] for name, plan in termux_extra._LOCATION_PLAN.items()
+        }
+        self.assertLess(budgets["fast"], budgets["balanced"])
+        self.assertLess(budgets["balanced"], budgets["precise"])
 
-    def test_the_slowest_precision_still_fits_the_tool_timeout(self):
-        slowest = max(deadline for _, deadline in termux_extra._LOCATION_PRECISION.values())
-        self.assertGreater(spec().timeout_seconds, slowest)
+    def test_tighter_precision_demands_tighter_accuracy(self):
+        target = termux_extra._LOCATION_TARGET
+        self.assertGreater(target["fast"], target["balanced"])
+        self.assertGreater(target["balanced"], target["precise"])
+
+    def test_every_precision_leads_with_gps(self):
+        for name, plan in termux_extra._LOCATION_PLAN.items():
+            with self.subTest(precision=name):
+                self.assertEqual(plan[0][0], "gps")
 
     def test_unknown_precision_falls_back_to_balanced(self):
-        with patched({("network", "once"): (True, json.dumps(self.FINE))}):
+        with patched({("gps", "once"): (True, json.dumps(self.FINE))}):
             result = run({"precision": "nonsense"})
         self.assertEqual(result.status, "ok")
 
@@ -340,6 +340,7 @@ class RealDeviceTests(unittest.TestCase):
         }):
             result = run()
         self.assertEqual(result.data["provider"], "gps")
+        self.assertEqual(result.data["provider"], "gps")
         self.assertAlmostEqual(result.data["latitude"], 22.364643333333333)
         self.assertEqual(result.data["accuracy"], 8.0)
         self.assertFalse(result.data["approximate"])
@@ -347,8 +348,8 @@ class RealDeviceTests(unittest.TestCase):
 
     def test_the_800m_network_reading_would_be_flagged_on_its_own(self):
         with patched({
-            ("network", "once"): (True, json.dumps(self.NETWORK)),
             ("gps", "once"): (True, ""),
+            ("network", "once"): (True, json.dumps(self.NETWORK)),
         }):
             result = run()
         self.assertTrue(result.data["approximate"])
@@ -369,15 +370,15 @@ class RealDeviceTests(unittest.TestCase):
         )
         self.assertLess(termux_extra._location_rank(gps), termux_extra._location_rank(network))
 
-    def test_a_coarse_network_fix_does_not_stop_the_race(self):
-        """800 m misses the balanced target, so GPS must still be awaited."""
+    def test_the_8m_gps_fix_short_circuits_everything_else(self):
+        """The owner's warm GPS answers instantly; nothing else is needed."""
         with patched({
-            ("network", "once"): (True, json.dumps(self.NETWORK)),
             ("gps", "once"): (True, json.dumps(self.GPS)),
+            ("network", "once"): (True, json.dumps(self.NETWORK)),
         }) as fake:
             result = run()
-        self.assertEqual(result.data["provider"], "gps")
-        self.assertIn("gps", [call[0] for call in fake.calls])
+        self.assertEqual(result.data["accuracy"], 8.0)
+        self.assertEqual([call[0] for call in fake.calls], ["gps"])
 
 
 class LocationServicesOffTests(unittest.TestCase):
@@ -439,10 +440,11 @@ class LocationSchemaTests(unittest.TestCase):
             set(properties["provider"]["enum"]), {"network", "gps", "passive"}
         )
 
-    def test_description_warns_the_model_that_gps_is_slow(self):
+    def test_description_tells_the_model_gps_comes_first(self):
         description = spec().description.lower()
+        self.assertIn("gps", description)
         self.assertIn("network", description)
-        self.assertIn("can take a minute", description)
+        self.assertIn("up to a minute", description)
 
     def test_location_stays_a_sensitive_read(self):
         self.assertEqual(spec().risk.value, "sensitive_read")

@@ -238,17 +238,22 @@ native Android builds see
 
 ### Location
 
-**The one thing to know:** since Android 8, *"location updates are provided to
-background apps only a few times each hour"*, and
-[that limit applies regardless of the app's target SDK](https://developer.android.com/about/versions/oreo/background-location-limits).
-`termux-location -r once` asks for a **new** fix, so it returns instantly when
-Termux is on screen and can stall for many minutes when it is not. That single
-fact is why location works from the Termux terminal and used to time out when
-the identical code ran behind a chat app.
+**Two things can make a live fix slow or fail, and they are easy to confuse.**
 
-So `get_location` reads the **last known fix first**. That read is not
-throttled, returns immediately, and on a phone in normal use is seconds old and
-GPS-accurate. A live request is only made when the cached fix is old (over
+1. *Background location limits.* Since Android 8, new location updates go to
+   background apps
+   [only a few times each hour](https://developer.android.com/about/versions/oreo/background-location-limits),
+   regardless of target SDK. `termux-location -r once` asks for a **new** fix,
+   so it can stall while Termux is off screen. **But this is not universal:**
+   on a tested Android 14 realme device a backgrounded `-r once` still
+   returned a GPS fix in ~5 seconds. Do not assume throttling without
+   evidence.
+2. *Phantom process killing.* See the Termux:API section below.
+
+`get_location` therefore reads the **last known fix first**. That read is
+never throttled, returns in milliseconds, and on a phone in normal use is
+seconds old and GPS-accurate. It is preferred because it is strictly cheaper
+and cannot stall - not because a live request is assumed to fail. A live request is only made when the cached fix is old (over
 2 minutes) or too coarse. Order:
 
 1. Cached GPS fix, then cached network fix - instant, background-safe.

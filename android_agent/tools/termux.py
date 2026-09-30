@@ -7,6 +7,7 @@ No generic shell capability is exposed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -15,6 +16,8 @@ from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
 from .registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT = 64 * 1024
 
@@ -58,15 +61,26 @@ def _run(args: list[str], timeout: float = 12.0) -> tuple[bool, str]:
         raw_out, raw_err = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_group(process)
+        # Worth a warning, not a debug line: killing the client is also what
+        # makes the Termux:API app fail to deliver and show the owner a
+        # "Connection refused" error screen.
+        logger.warning("%s timed out after %.0fs and was killed", " ".join(args), timeout)
         return False, f"{args[0]} timed out after {timeout:.0f}s"
     except OSError as exc:
         _kill_group(process)
+        logger.warning("%s failed: %s", args[0], type(exc).__name__)
         return False, f"{args[0]} failed: {type(exc).__name__}"
 
     stdout = (raw_out or b"")[:_MAX_OUTPUT].decode("utf-8", "replace").strip()
     stderr = (raw_err or b"")[:2048].decode("utf-8", "replace").strip()
     if process.returncode != 0:
-        return False, stderr or stdout or f"command exited {process.returncode}"
+        reason = stderr or stdout or f"command exited {process.returncode}"
+        logger.warning("%s exited %s: %s", args[0], process.returncode, reason[:200])
+        return False, reason
+    if not stdout:
+        # Exit 0 with no output is a real Termux:API failure mode; without a
+        # log line it is indistinguishable from a tool that returns nothing.
+        logger.info("%s exited 0 with no output", " ".join(args))
     return True, stdout
 
 

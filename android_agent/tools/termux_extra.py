@@ -191,15 +191,17 @@ _LOCATION_FRESH_SECONDS = 120.0
 #: Wi-Fi assisted is 15-150 m; GPS outdoors is 5-20 m.
 _LOCATION_COARSE_METRES = 300.0
 
-#: Why the cached fix is tried first, even though it sounds like the weaker
-#: option: since Android 8, "location updates are provided to background apps
-#: only a few times each hour" - and that limit applies regardless of the
-#: app's target SDK. `termux-location -r once` asks LocationManager for a *new*
-#: update, so it returns instantly when Termux is on screen and can block for
-#: many minutes when it is not. Reading the last known fix is not throttled,
-#: comes back immediately, and on a phone whose GPS was recently used is both
-#: current and precise. That single difference is why location worked from the
-#: Termux terminal and timed out when the same code ran behind a chat app.
+#: Why the cached fix is tried first. Android 8+ limits background apps to a
+#: few new location fixes an hour, and `termux-location -r once` asks for a
+#: *new* fix, so on some devices it stalls whenever Termux is off screen.
+#: MEASURED CAVEAT: on at least one Android 14 device (realme RMP2402) a
+#: backgrounded `-r once` still returned a GPS fix in about five seconds, so
+#: throttling is a real risk but is NOT universal - do not present it as the
+#: explanation for a given failure without evidence from the log.
+#: Reading the last known fix is never throttled, returns in milliseconds, and
+#: on a phone in normal use is seconds old and GPS-accurate. It is preferred
+#: because it is strictly cheaper and cannot stall, not because a live request
+#: is assumed to fail.
 _LOCATION_BACKGROUND_HELP = (
     "Android only gives background apps a new location fix a few times an "
     "hour, so a live GPS request can stall while Termux is off screen. Switch "

@@ -36,6 +36,11 @@ def run(arguments=None):
     return termux_extra._location(None, arguments or {})
 
 
+def live_calls(fake):
+    """Providers asked for a *new* fix - the throttled kind."""
+    return [provider for provider, request, _ in fake.calls if request == "once"]
+
+
 class FakeTermux:
     """Stands in for _run, keyed by (provider, request)."""
 
@@ -75,7 +80,7 @@ class LocationSuccessTests(unittest.TestCase):
         gps = dict(FIX, provider="gps", accuracy=8.0)
         with patched({("gps", "once"): (True, json.dumps(gps))}) as fake:
             run()
-        self.assertEqual(len(fake.calls), 1)
+        self.assertNotIn(("network", "once"), [(p, r) for p, r, _ in fake.calls])
 
     def test_network_is_used_only_when_gps_gives_nothing(self):
         with patched({
@@ -84,7 +89,7 @@ class LocationSuccessTests(unittest.TestCase):
         }) as fake:
             result = run()
         self.assertEqual(result.data["provider"], "network")
-        self.assertEqual([call[0] for call in fake.calls], ["gps", "network"])
+        self.assertEqual(live_calls(fake), ["gps", "network"])
 
     def test_summary_is_human_readable(self):
         with patched({("network", "once"): (True, json.dumps(FIX))}):
@@ -98,6 +103,37 @@ class LocationSuccessTests(unittest.TestCase):
             result = run({"provider": "network"})
         self.assertEqual(result.data["provider"], "network")
         self.assertEqual({call[0] for call in fake.calls}, {"network"})
+
+    def test_a_recent_cached_fix_is_used_without_a_live_request(self):
+        """The fix for the real bug: -r once is throttled in the background."""
+        recent = dict(FIX, provider="gps", accuracy=8.0, elapsedMs=3000)
+        with patched({("gps", "last"): (True, json.dumps(recent))}) as fake:
+            result = run()
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["accuracy"], 8.0)
+        self.assertFalse(result.data["stale"])
+        self.assertEqual(live_calls(fake), [])
+
+    def test_an_old_cached_fix_does_not_short_circuit_a_live_request(self):
+        old = dict(FIX, provider="gps", accuracy=8.0, elapsedMs=30 * 60 * 1000)
+        fresh = dict(FIX, provider="gps", accuracy=9.0, elapsedMs=100)
+        with patched({
+            ("gps", "last"): (True, json.dumps(old)),
+            ("gps", "once"): (True, json.dumps(fresh)),
+        }) as fake:
+            result = run()
+        self.assertEqual(result.data["accuracy"], 9.0)
+        self.assertIn("gps", live_calls(fake))
+
+    def test_a_coarse_cached_fix_does_not_short_circuit_a_live_request(self):
+        coarse = dict(FIX, provider="network", accuracy=800.0, elapsedMs=1000)
+        with patched({
+            ("network", "last"): (True, json.dumps(coarse)),
+            ("gps", "once"): (True, json.dumps(dict(FIX, provider="gps", accuracy=8.0))),
+        }) as fake:
+            result = run()
+        self.assertEqual(result.data["accuracy"], 8.0)
+        self.assertIn("gps", live_calls(fake))
 
     def test_gps_gets_a_longer_budget_than_network(self):
         plan = dict(termux_extra._LOCATION_PLAN["balanced"])
@@ -121,7 +157,7 @@ class LocationFallbackTests(unittest.TestCase):
             result = run()
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.data["provider"], "network")
-        self.assertEqual([c[0] for c in fake.calls], ["gps", "network"])
+        self.assertEqual(live_calls(fake), ["gps", "network"])
 
     def test_falls_back_to_a_cached_fix_and_flags_it_stale(self):
         cached = dict(FIX, elapsedMs=15 * 60 * 1000)
@@ -149,14 +185,15 @@ class LocationFallbackTests(unittest.TestCase):
         self.assertFalse(result.data["stale"])
         self.assertNotIn("last known", result.summary)
 
-    def test_fresh_fix_is_preferred_over_cache(self):
+    def test_a_live_fix_wins_when_the_cache_is_worse(self):
+        stale_coarse = dict(FIX, accuracy=900.0, elapsedMs=60 * 60 * 1000)
         with patched({
-            ("gps", "once"): (True, json.dumps(dict(FIX, accuracy=8.0))),
-            ("gps", "last"): (True, json.dumps(dict(FIX, latitude=0.0))),
-        }) as fake:
+            ("gps", "last"): (True, json.dumps(stale_coarse)),
+            ("gps", "once"): (True, json.dumps(dict(FIX, accuracy=8.0, elapsedMs=50))),
+        }):
             result = run()
-        self.assertAlmostEqual(result.data["latitude"], 22.5726)
-        self.assertNotIn("last", [c[1] for c in fake.calls])
+        self.assertEqual(result.data["accuracy"], 8.0)
+        self.assertFalse(result.data["stale"])
 
 
 class LocationAccuracyTests(unittest.TestCase):
@@ -287,12 +324,13 @@ class LocationFailureTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("unreadable", result.summary)
 
-    def test_error_explains_permissions_and_indoor_gps(self):
+    def test_error_explains_permissions_and_background_throttling(self):
         with patched({}):
             result = run()
         self.assertIn("Location permission", result.summary)
         self.assertIn("Termux:API", result.summary)
-        self.assertIn("indoors", result.summary.lower())
+        self.assertIn("background apps", result.summary)
+        self.assertIn("termux-wake-lock", result.summary)
 
     def test_error_is_retryable(self):
         with patched({}):
@@ -378,7 +416,15 @@ class RealDeviceTests(unittest.TestCase):
         }) as fake:
             result = run()
         self.assertEqual(result.data["accuracy"], 8.0)
-        self.assertEqual([call[0] for call in fake.calls], ["gps"])
+        self.assertEqual(live_calls(fake), ["gps"])
+
+    def test_the_same_gps_reading_from_cache_needs_no_live_request(self):
+        """elapsedMs 120 means the fix is 0.12s old - as good as live."""
+        with patched({("gps", "last"): (True, json.dumps(self.GPS))}) as fake:
+            result = run()
+        self.assertEqual(result.data["accuracy"], 8.0)
+        self.assertFalse(result.data["stale"])
+        self.assertEqual(live_calls(fake), [])
 
 
 class LocationServicesOffTests(unittest.TestCase):
@@ -431,6 +477,71 @@ class LocationServicesOffTests(unittest.TestCase):
             run()
         cached = [provider for provider, request, _ in fake.calls if request == "last"]
         self.assertEqual(cached, ["gps", "network", "passive"])
+
+
+class BackgroundThrottlingTests(unittest.TestCase):
+    """Android gives background apps a new fix only a few times an hour.
+
+    That is the difference between `termux-location` in the terminal (Termux
+    on screen, instant) and the same call from the agent (Termux behind a chat
+    app, stalls until the timeout). The cached read is not throttled, so it is
+    tried first and is what makes the common case fast.
+    """
+
+    def test_cached_reads_happen_before_any_live_request(self):
+        with patched({}) as fake:
+            run()
+        first = fake.calls[0]
+        self.assertEqual(first[1], "last")
+
+    def test_a_stalled_live_request_still_yields_the_cached_fix(self):
+        cached = dict(FIX, provider="gps", accuracy=15.0, elapsedMs=20 * 60 * 1000)
+        with patched({
+            ("gps", "last"): (True, json.dumps(cached)),
+            ("gps", "once"): (False, "termux-location timed out after 25s"),
+            ("network", "once"): (False, "termux-location timed out after 10s"),
+        }):
+            result = run()
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.data["stale"])
+        self.assertTrue(result.data["live_fix_failed"])
+
+    def test_that_answer_explains_why_the_live_fix_failed(self):
+        cached = dict(FIX, provider="gps", accuracy=15.0, elapsedMs=20 * 60 * 1000)
+        with patched({
+            ("gps", "last"): (True, json.dumps(cached)),
+            ("gps", "once"): (False, "termux-location timed out after 25s"),
+        }):
+            summary = run().summary
+        self.assertIn("background apps", summary)
+        self.assertIn("Switch to Termux", summary)
+        self.assertIn("20 min old", summary)
+
+    def test_location_being_off_is_still_reported_as_such(self):
+        """Don't blame backgrounding when the switch is simply off."""
+        cached = dict(FIX, provider="gps", accuracy=15.0, elapsedMs=20 * 60 * 1000)
+        with patched({
+            ("gps", "last"): (True, json.dumps(cached)),
+            ("gps", "once"): (False, "gps provider is disabled"),
+            ("network", "once"): (False, "network provider is disabled"),
+        }):
+            summary = run().summary
+        self.assertIn("switched off", summary)
+        self.assertNotIn("background apps", summary)
+
+    def test_the_fast_path_costs_at_most_two_cached_reads(self):
+        recent = dict(FIX, provider="gps", accuracy=8.0, elapsedMs=500)
+        with patched({("gps", "last"): (True, json.dumps(recent))}) as fake:
+            run()
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_cached_reads_use_a_short_timeout(self):
+        with patched({}) as fake:
+            run()
+        for provider, request, timeout in fake.calls:
+            if request == "last":
+                with self.subTest(provider=provider):
+                    self.assertLessEqual(timeout, 10.0)
 
 
 class LocationSchemaTests(unittest.TestCase):

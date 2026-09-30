@@ -169,12 +169,10 @@ def _call_state() -> str | None:
     return str(state).upper() if isinstance(state, str) else None
 
 
-#: GPS is asked first and alone. Two reasons, both learned the hard way:
-#: Termux:API serves one location request at a time, so firing GPS and network
-#: together makes the second one fail and throws a "Connection refused"
-#: Termux:API Error screen at the owner; and on a warm receiver GPS answers in
-#: well under a second, so there is nothing to gain by racing it.
-#: (provider, seconds) pairs, tried in order, per precision level.
+#: GPS is asked first and alone. Termux:API serves one location request at a
+#: time, so firing GPS and network together makes the second fail and throws a
+#: "Connection refused" Termux:API Error screen at the owner.
+#: (provider, seconds) pairs for a *fresh* fix, tried in order, per precision.
 _LOCATION_PLAN = {
     "fast": (("gps", 8.0), ("network", 6.0)),
     "balanced": (("gps", 25.0), ("network", 10.0)),
@@ -184,12 +182,30 @@ _LOCATION_PLAN = {
 _LOCATION_TARGET = {"fast": 1000.0, "balanced": 150.0, "precise": 25.0}
 #: A cached fix is either instant or useless, so it gets a short leash.
 _LOCATION_LAST_TIMEOUT = 6.0
-#: Anything older than this is reported as stale rather than passed off as now.
+#: A cached fix younger than this is as good as a live one, and is the only
+#: thing that works reliably while Termux is in the background - see below.
 _LOCATION_FRESH_SECONDS = 120.0
 #: Beyond this radius the answer is a neighbourhood, not a position, and the
 #: reply has to say so. A cell-tower-only fix is routinely 600 m to several km;
 #: Wi-Fi assisted is 15-150 m; GPS outdoors is 5-20 m.
 _LOCATION_COARSE_METRES = 300.0
+
+#: Why the cached fix is tried first, even though it sounds like the weaker
+#: option: since Android 8, "location updates are provided to background apps
+#: only a few times each hour" - and that limit applies regardless of the
+#: app's target SDK. `termux-location -r once` asks LocationManager for a *new*
+#: update, so it returns instantly when Termux is on screen and can block for
+#: many minutes when it is not. Reading the last known fix is not throttled,
+#: comes back immediately, and on a phone whose GPS was recently used is both
+#: current and precise. That single difference is why location worked from the
+#: Termux terminal and timed out when the same code ran behind a chat app.
+_LOCATION_BACKGROUND_HELP = (
+    "Android only gives background apps a new location fix a few times an "
+    "hour, so a live GPS request can stall while Termux is off screen. Switch "
+    "to Termux (or run termux-wake-lock and allow unrestricted battery use) "
+    "and ask again for a fresh fix."
+)
+
 
 #: termux-location surfaces a switched-off provider as one of these, rather
 #: than as a distinct exit code.
@@ -210,12 +226,11 @@ _LOCATION_OFF_HELP = (
 _LOCATION_HELP = (
     "No location fix. Check that the Termux:API app is installed, that it has "
     "the Location permission (Settings > Apps > Termux:API > Permissions), and "
-    "that system location is switched on. Indoors, GPS often never gets a fix - "
-    "try provider 'network'."
+    "that system location is switched on."
 )
 
 #: Termux:API handles one location request at a time. Serialise our own calls
-#: so two agent turns can never collide into the failure above.
+#: so two agent turns can never collide into a "Connection refused" failure.
 _location_lock = threading.Lock()
 
 
@@ -307,14 +322,40 @@ def _location_summary(payload: Mapping[str, Any]) -> str:
     return summary
 
 
-def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
-    """Get a position from the device, GPS first.
+def _location_cached(
+    providers: tuple[str, ...], target: float
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Read the last known fix from each provider. Never throttled, instant."""
+    best: dict[str, Any] | None = None
+    failures: list[str] = []
+    for provider in providers:
+        data, reason = _location_read(provider, "last", _LOCATION_LAST_TIMEOUT)
+        if data is None:
+            failures.append(f"{provider} cached: {reason}")
+            continue
+        candidate = _location_payload(data, provider, "last")
+        if best is None or _location_rank(candidate) < _location_rank(best):
+            best = candidate
+        if _location_fresh(best) and _location_metres(best) <= target:
+            break
+    return best, failures
 
-    Requests run strictly one at a time: Termux:API serves a single location
-    request, and overlapping calls make it fail to deliver its answer. GPS is
-    tried first because it is the only source that is actually precise - a
-    network fix can be 800 m or worse - and a warm receiver answers instantly,
-    so asking it first costs nothing in the common case.
+
+def _location_fresh(payload: Mapping[str, Any]) -> bool:
+    age = payload.get("fix_age_seconds")
+    return isinstance(age, (int, float)) and age <= _LOCATION_FRESH_SECONDS
+
+
+def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+    """Get a position from the device: recent cached fix first, then a live one.
+
+    The ordering is the whole point. Asking for a *new* fix is throttled to a
+    few times an hour whenever Termux is in the background, which is exactly
+    where this code runs when the owner is in a chat app - so the obvious
+    implementation times out in production while working perfectly from the
+    terminal. The last known fix is not throttled, returns immediately, and on
+    a phone in normal use is seconds old and GPS-accurate. A live request is
+    still made when the cache is old or coarse.
     """
     del context
     precision = str(arguments.get("precision") or "balanced")
@@ -322,46 +363,68 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     target = _LOCATION_TARGET.get(precision, _LOCATION_TARGET["balanced"])
     requested = arguments.get("provider")
     if requested:
-        plan = tuple((provider, seconds) for provider, seconds in plan if provider == requested) \
+        plan = tuple((p, seconds) for p, seconds in plan if p == requested) \
             or ((str(requested), 25.0),)
 
-    best: dict[str, Any] | None = None
     failures: list[str] = []
 
     with _location_lock:
+        # 1. Recent cached fix: instant, and works with Termux in background.
+        best, cached_failures = _location_cached(tuple(p for p, _ in plan), target)
+        failures.extend(cached_failures)
+        if best is not None and _location_fresh(best) and _location_metres(best) <= target:
+            fresh = dict(best, stale=False)
+            return ToolResult.ok(_location_summary(fresh), fresh)
+
+        # 2. Ask for a live fix. Fast on screen, throttled off it.
+        live: dict[str, Any] | None = None
         for provider, seconds in plan:
             data, reason = _location_read(provider, "once", seconds)
             if data is None:
                 failures.append(f"{provider}: {reason}")
                 continue
             candidate = _location_payload(data, provider, "once")
-            if best is None or _location_rank(candidate) < _location_rank(best):
-                best = candidate
-            if _location_metres(best) <= target:
+            if live is None or _location_rank(candidate) < _location_rank(live):
+                live = candidate
+            if _location_metres(live) <= target:
                 break
 
+        if live is not None:
+            # A live fix beats a cached one even if the cached figure looks a
+            # metre tighter: the phone may have moved since. Only a fix that
+            # is still fresh *and* genuinely more accurate wins.
+            if best is not None and _location_fresh(best) and (
+                _location_metres(best) < _location_metres(live)
+            ):
+                fresh = dict(best, stale=False)
+                return ToolResult.ok(_location_summary(fresh), fresh)
+            return ToolResult.ok(_location_summary(live), live)
+
+        # 3. Fall back to the cached fix, labelled with its age and the reason
+        #    a live one could not be had.
         if best is not None:
-            return ToolResult.ok(_location_summary(best), best)
+            payload = dict(best, live_fix_failed=True)
+            summary = _location_summary(payload)
+            if _location_disabled(failures):
+                summary += " No live fix was possible: " + _LOCATION_OFF_HELP
+            else:
+                summary += " " + _LOCATION_BACKGROUND_HELP
+            return ToolResult.ok(summary, payload)
 
-        # Nothing fresh - which is also what happens when location is switched
-        # off. A cached fix still answers "roughly where is my phone", as long
-        # as it is labelled honestly.
-        for provider in ("gps", "network", "passive"):
-            data, reason = _location_read(provider, "last", _LOCATION_LAST_TIMEOUT)
-            if data is not None:
-                payload = _location_payload(data, provider, "last")
-                payload["live_fix_failed"] = True
-                summary = _location_summary(payload)
-                if _location_disabled(failures):
-                    summary += " No live fix was possible: " + _LOCATION_OFF_HELP
-                return ToolResult.ok(summary, payload)
-            failures.append(f"{provider} cached: {reason}")
+        data, reason = _location_read("passive", "last", _LOCATION_LAST_TIMEOUT)
+        if data is not None:
+            payload = _location_payload(data, "passive", "last")
+            payload["live_fix_failed"] = True
+            return ToolResult.ok(_location_summary(payload), payload)
+        failures.append(f"passive cached: {reason}")
 
-    help_text = _LOCATION_OFF_HELP if _location_disabled(failures) else _LOCATION_HELP
+    if _location_disabled(failures):
+        help_text, code = _LOCATION_OFF_HELP, "location_services_off"
+    else:
+        help_text = f"{_LOCATION_HELP} {_LOCATION_BACKGROUND_HELP}"
+        code = "location_unavailable"
     return ToolResult.error(
-        f"{help_text} Tried - " + "; ".join(failures),
-        code="location_services_off" if _location_disabled(failures) else "location_unavailable",
-        retryable=True,
+        f"{help_text} Tried - " + "; ".join(failures), code=code, retryable=True
     )
 
 

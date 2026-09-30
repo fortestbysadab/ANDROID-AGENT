@@ -238,46 +238,60 @@ native Android builds see
 
 ### Location
 
-`get_location` asks **GPS first, on its own**, and falls back to network
-positioning only if GPS gives nothing. Two hard-won reasons for that shape:
+**The one thing to know:** since Android 8, *"location updates are provided to
+background apps only a few times each hour"*, and
+[that limit applies regardless of the app's target SDK](https://developer.android.com/about/versions/oreo/background-location-limits).
+`termux-location -r once` asks for a **new** fix, so it returns instantly when
+Termux is on screen and can stall for many minutes when it is not. That single
+fact is why location works from the Termux terminal and used to time out when
+the identical code ran behind a chat app.
 
-- **GPS is the only precise source.** On a real device GPS reports ~8 m while
-  the network provider reports ~800 m, and the two can sit 2 km apart. Network
-  positioning is 15-150 m only when Wi-Fi contributes; on cell towers alone it
-  is 600 m to several kilometres.
-- **Termux:API serves one location request at a time.** Asking GPS and network
-  together makes it fail to deliver its answer, which surfaces as a
-  full-screen `Termux:API Error - java.io.IOException: Connection refused`.
-  Requests are serialised with a lock so two agent turns cannot collide.
+So `get_location` reads the **last known fix first**. That read is not
+throttled, returns immediately, and on a phone in normal use is seconds old and
+GPS-accurate. A live request is only made when the cached fix is old (over
+2 minutes) or too coarse. Order:
 
-Related: a timed-out command is killed by **process group**, not just the
-wrapper process. Every `termux-*` command spawns a `termux-api` helper that
-owns the socket the Termux:API app replies on; killing only the wrapper leaves
-that helper orphaned and produces the same "Connection refused" error screen.
+1. Cached GPS fix, then cached network fix - instant, background-safe.
+2. Live GPS, then live network - accurate on screen, throttled off it.
+3. The cached fix again, labelled stale with its age plus the reason a live one
+   failed.
 
-With a warm GPS this returns in about a second. `precision` controls how long
-a cold GPS is given: `fast` 8s, `balanced` (default) 25s, `precise` 60s.
+A live fix beats a cached one even when the cached figure looks a metre
+tighter, because the phone may have moved since.
 
-Any fix wider than 300 m is flagged `approximate`, and the reply says so
-rather than presenting a kilometre-wide circle as your position. If nothing
-answers, the last known fix is returned labelled stale with its age. If
-location is off the error is `location_services_off`, which names the real
-problem.
+**Why GPS first, and one request at a time**
 
-There is **no IP-address fallback**. It was tried and removed: it reported a
-city 100 km away while the device's own GPS was working fine, which is worse
-than no answer. No tool in this project contacts a third-party service.
+- GPS reports ~8 m where the network provider reports ~800 m; the two can sit
+  2 km apart. Network positioning is 15-150 m only when Wi-Fi contributes; on
+  cell towers alone it is 600 m to several kilometres.
+- Termux:API serves one location request at a time. Asking GPS and network
+  together makes it fail to deliver, surfacing as a full-screen
+  `Termux:API Error - java.io.IOException: Connection refused`. Calls are
+  serialised with a lock so two agent turns cannot collide.
+
+Relatedly, a timed-out command is killed by **process group**. Every `termux-*`
+command spawns a `termux-api` helper holding the socket the app replies on;
+killing only the wrapper orphans that helper and produces the same error
+screen.
+
+`precision` controls how long a cold GPS is given: `fast` 8s, `balanced`
+(default) 25s, `precise` 60s. Fixes wider than 300 m are flagged `approximate`.
+If location is off the error is `location_services_off`. There is **no
+IP-address fallback** - it was tried and removed after it reported a city
+100 km away while the device's own GPS was working.
+
+**If you want a guaranteed-fresh fix**, bring Termux to the foreground, or:
+
+```sh
+termux-wake-lock     # plus Settings > Apps > Termux > Battery > Unrestricted
+```
 
 **Troubleshooting**
 
 ```sh
-termux-location -p gps -r once      # compare "accuracy" between the two
-termux-location -p network -r once
+termux-location -p gps -r last     # what the agent reads first
+termux-location -p gps -r once     # compare; slow in the background
 ```
-
-If those work in the terminal but the agent does not, check `agent.log` for
-the timeout used - a cold GPS outdoors can exceed `fast`. Indoors GPS often
-never fixes at all; that is Android, not the agent.
 
 ### Phone calls
 

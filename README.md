@@ -63,6 +63,74 @@ Three things bite people here, and the agent now handles all three:
 3. **The model name must be real.** `python -m android_agent.doctor` lists what the endpoint actually offers.
 4. **Gemini 3 thinking models require thought signatures.** Each tool call comes back with an opaque `thought_signature` under `tool_calls[].extra_content.google`, and the follow-up turn is rejected with `400 Function call is missing a thought_signature in functionCall parts` unless it is replayed verbatim. The planner captures it onto `ToolCall.extra_content` and the runtime replays it. Signatures are opaque transport data: they are never interpreted, never shown, and never affect a policy decision.
 
+## Conversation sessions
+
+The agent keeps a conversation window so follow-up messages have context
+("what about the torch?" after asking about the battery).
+
+- A session lasts **15 minutes of inactivity** by default; each message resets
+  the timer. Configure with `ANDROID_AGENT_SESSION_TTL_MINUTES`.
+- `/new` (or `/reset`) starts a fresh conversation immediately.
+- `/session` shows the current session id, turn count, and time remaining.
+
+History is stored in SQLite at `$ANDROID_AGENT_STATE_DIR/sessions.db`, because
+Android kills background Termux processes freely and an in-memory store would
+lose the conversation on every restart.
+
+Expiry is a privacy feature as much as a context one: sensitive tool output
+(contacts, SMS, location) does not linger in model context indefinitely.
+
+Two structural invariants are enforced, because violating either makes the
+provider reject the next request:
+
+1. History is trimmed only at user-message boundaries, so a tool call is never
+   separated from its result.
+2. A run that pauses for approval or exhausts its budget leaves an unanswered
+   tool call; `close_open_tool_calls` writes an honest `not_executed` result
+   rather than letting the orphan corrupt the next turn.
+
+Only one run executes per chat at a time; a second message while one is in
+flight is rejected rather than interleaved.
+
+## Optional: on-device fast path with Needle
+
+[Needle](https://github.com/cactus-compute/needle) is a tiny (8-35 MB)
+tool-calling specialist from Cactus Compute that runs entirely on the device.
+Enabling it lets simple commands ("turn on the torch", "battery?") be answered
+**offline, with no API call and no data leaving the phone**.
+
+```sh
+pip install cactus-needle
+# then set ANDROID_AGENT_NEEDLE=1
+```
+
+How it is integrated, and the limits:
+
+- **`complete()` only, never `run()`.** `Needle.run()` executes Python
+  callables itself, which would bypass this project's validator, policy
+  engine, approval flow, and audit trail.
+- **Confidence routes; it never authorizes.** A Needle proposal goes through
+  exactly the same schema validation and policy evaluation as a cloud
+  proposal. There are tests asserting that a confidence of 1.0 still cannot
+  execute a denied tool or pass invalid arguments.
+- **A ten-tool allowlist.** Only read-only status and trivially reversible
+  actuators are fast-path eligible. SMS, calls, location, contacts, clipboard,
+  files, screenshots and raw UI control always go to the cloud planner,
+  regardless of confidence. A test enforces that every allowlisted tool is
+  `read_only` or `reversible`.
+- **Escalation is the failure mode.** Low confidence, no confidence (which is
+  what fine-tuned Needle builds report), a multi-step request, an undeclared
+  tool, or any exception all fall through to the cloud planner.
+- **It only handles the opening turn.** Needle cannot converse or summarize.
+  When it handles a turn end to end, the reply is the tool's own deterministic
+  summary rather than a generated sentence.
+
+**Caveat for Termux:** the published wheels target glibc/musl Linux and Termux
+is bionic, so the prebuilt engine may not load. If it fails, the agent logs a
+warning and runs cloud-only; enabling the flag can never break the bot. For
+native Android builds see
+[`needle build --platform android-arm64`](https://cactuscompute.com/blog/needle-supported-devices).
+
 ### Troubleshooting
 
 `python -m android_agent.doctor` checks configuration, endpoint reachability, credentials, model availability, schema sanitisation, a live tool-calling round trip, and `termux-api` presence. Logs are written to `~/telegram_agent_v2/agent.log`.

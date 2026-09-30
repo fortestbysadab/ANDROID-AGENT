@@ -47,6 +47,11 @@ class Settings:
     llm_dialect: Dialect
     log_level: str = "INFO"
     request_timeout_seconds: float = 60.0
+    session_ttl_seconds: float = 900.0
+    session_max_messages: int = 60
+    state_dir: str = "~/telegram_agent_v2"
+    needle_enabled: bool = False
+    needle_confidence_threshold: float = 0.85
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -99,6 +104,30 @@ class Settings:
         if timeout <= 0:
             raise ValueError("ANDROID_AGENT_LLM_TIMEOUT must be positive")
 
+        ttl_raw = os.environ.get("ANDROID_AGENT_SESSION_TTL_MINUTES", "15").strip()
+        try:
+            ttl_minutes = float(ttl_raw)
+        except ValueError as exc:
+            raise ValueError("ANDROID_AGENT_SESSION_TTL_MINUTES must be a number") from exc
+        if ttl_minutes <= 0:
+            raise ValueError("ANDROID_AGENT_SESSION_TTL_MINUTES must be positive")
+
+        max_messages_raw = os.environ.get("ANDROID_AGENT_SESSION_MAX_MESSAGES", "60").strip()
+        try:
+            max_messages = int(max_messages_raw)
+        except ValueError as exc:
+            raise ValueError("ANDROID_AGENT_SESSION_MAX_MESSAGES must be an integer") from exc
+        if max_messages < 2:
+            raise ValueError("ANDROID_AGENT_SESSION_MAX_MESSAGES must be at least 2")
+
+        threshold_raw = os.environ.get("ANDROID_AGENT_NEEDLE_THRESHOLD", "0.85").strip()
+        try:
+            needle_threshold = float(threshold_raw)
+        except ValueError as exc:
+            raise ValueError("ANDROID_AGENT_NEEDLE_THRESHOLD must be a number") from exc
+        if not 0.0 < needle_threshold <= 1.0:
+            raise ValueError("ANDROID_AGENT_NEEDLE_THRESHOLD must be between 0 and 1")
+
         api_key = (os.environ.get("ANDROID_AGENT_LLM_API_KEY") or "").strip() or None
         if dialect is Dialect.GEMINI and not api_key:
             raise ValueError(
@@ -114,6 +143,13 @@ class Settings:
             llm_dialect=dialect,
             log_level=os.environ.get("ANDROID_AGENT_LOG_LEVEL", "INFO").strip() or "INFO",
             request_timeout_seconds=timeout,
+            session_ttl_seconds=ttl_minutes * 60.0,
+            session_max_messages=max_messages,
+            state_dir=os.environ.get("ANDROID_AGENT_STATE_DIR", "~/telegram_agent_v2").strip()
+            or "~/telegram_agent_v2",
+            needle_enabled=os.environ.get("ANDROID_AGENT_NEEDLE", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+            needle_confidence_threshold=needle_threshold,
         )
 
     def redacted(self) -> dict[str, object]:
@@ -126,4 +162,7 @@ class Settings:
             "llm_api_key": "set" if self.llm_api_key else "absent",
             "telegram_bot_token": "set" if self.telegram_bot_token else "absent",
             "log_level": self.log_level,
+            "session_ttl_minutes": round(self.session_ttl_seconds / 60, 1),
+            "state_dir": self.state_dir,
+            "needle_fast_path": self.needle_enabled,
         }

@@ -8,9 +8,11 @@ private chat.
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -19,8 +21,15 @@ import telebot
 from telebot import types
 
 from android_agent.agent.runtime import AgentRuntime, RunStatus
+from android_agent.agent.session import SqliteSessionStore
 from android_agent.approvals.store import InMemoryApprovalStore
 from android_agent.config import Settings
+from android_agent.models.needle import (
+    DEFAULT_FAST_PATH_TOOLS,
+    NeedleRouter,
+    NeedleUnavailable,
+    load_needle_agent,
+)
 from android_agent.models.openai_compatible import OpenAICompatiblePlanner
 from android_agent.observability.audit import JsonlAuditSink
 from android_agent.observability.logging import configure_logging
@@ -43,25 +52,63 @@ policy implementation details.
 """
 
 
+def _build_needle_router(settings, cloud, registry):
+    """Wrap the cloud planner with the on-device fast path, if it loads.
+
+    Needle is strictly optional. If the package or its engine is missing -
+    common on Termux, whose bionic libc is not covered by the published
+    wheels - the agent logs a warning and continues cloud-only.
+    """
+    eligible = [
+        schema
+        for schema in registry.model_schemas()
+        if schema["function"]["name"] in DEFAULT_FAST_PATH_TOOLS
+    ]
+    try:
+        agent = load_needle_agent(eligible)
+    except NeedleUnavailable as exc:
+        logger.warning("Needle fast path disabled: %s", exc)
+        return cloud
+    return NeedleRouter(
+        cloud=cloud,
+        agent=agent,
+        confidence_threshold=settings.needle_confidence_threshold,
+    )
+
+
 def build_bot(settings: Settings) -> telebot.TeleBot:
     telebot.apihelper.ENABLE_MIDDLEWARE = True
     bot = telebot.TeleBot(settings.telegram_bot_token)
-    audit_path = os.path.expanduser("~/telegram_agent_v2/audit.jsonl")
+    audit_path = os.path.join(os.path.expanduser(settings.state_dir), "audit.jsonl")
+    registry = build_full_registry()
+    planner = OpenAICompatiblePlanner(
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        api_key=settings.llm_api_key,
+        dialect=settings.llm_dialect,
+        timeout_seconds=settings.request_timeout_seconds,
+    )
+    if settings.needle_enabled:
+        planner = _build_needle_router(settings, planner, registry)
+
     runtime = AgentRuntime(
-        planner=OpenAICompatiblePlanner(
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            dialect=settings.llm_dialect,
-            timeout_seconds=settings.request_timeout_seconds,
-        ),
-        registry=build_full_registry(),
+        planner=planner,
+        registry=registry,
         policy=DefaultPolicy(str(settings.owner_chat_id)),
         system_prompt=SYSTEM_PROMPT,
         audit=JsonlAuditSink(audit_path),
         skill_router=SkillRouter.bundled(),
     )
     approvals = InMemoryApprovalStore(ttl_seconds=300)
+    sessions = SqliteSessionStore(
+        os.path.join(os.path.expanduser(settings.state_dir), "sessions.db"),
+        ttl_seconds=settings.session_ttl_seconds,
+        max_messages=settings.session_max_messages,
+    )
+    # One run at a time per chat. Concurrent runs would interleave writes to
+    # the same session history and corrupt the tool-call pairing.
+    chat_locks: dict[int, threading.Lock] = collections.defaultdict(threading.Lock)
+    ttl_minutes = int(settings.session_ttl_seconds // 60)
 
     def send_artifacts(chat_id: int, result: ToolResult) -> None:
         latitude, longitude = result.data.get("latitude"), result.data.get("longitude")
@@ -113,8 +160,16 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
     def welcome(message):
         bot.reply_to(
             message,
-            f"Android Agent v2 is online with {len(runtime.registry)} typed tools. "
-            "Send a natural-language request; I will select tools, validate arguments, and return a readable result. "
+            f"Android Agent v2 is online with {len(runtime.registry)} typed tools.\n\n"
+            "Send a natural-language request; I will select tools, validate arguments, "
+            "and return a readable result.\n\n"
+            f"I remember our conversation for {ttl_minutes} minutes of inactivity, "
+            "then start fresh automatically.\n\n"
+            "Commands:\n"
+            "• /new — start a new conversation now\n"
+            "• /session — show the current session\n"
+            "• /agent_status — runtime details\n"
+            "• /tools — list available tools\n\n"
             "Screen recording and arbitrary shell access are not available.",
         )
 
@@ -125,6 +180,9 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             "Agent runtime: online\n"
             f"Model: {settings.llm_model}\n"
             f"Provider dialect: {settings.llm_dialect.value}\n"
+            f"On-device fast path: "
+            f"{'active' if isinstance(runtime.planner, NeedleRouter) and runtime.planner.enabled else 'off'}\n"
+            f"Session window: {ttl_minutes} min idle\n"
             f"Endpoint: {settings.llm_base_url}\n"
             f"Tools: {len(runtime.registry)}\n"
             f"Skills: {len(runtime.skill_router.skills) if runtime.skill_router else 0}",
@@ -136,15 +194,69 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
         bot.reply_to(message, f"Available tools ({len(runtime.registry)}):\n{names}")
 
     @bot.message_handler(
+        commands=["new", "reset", "clear"],
+        func=lambda message: getattr(message, "_authorized", False),
+    )
+    def new_session(message):
+        existed = sessions.reset(message.chat.id)
+        bot.reply_to(
+            message,
+            "Started a new conversation. Previous context cleared."
+            if existed
+            else "Already starting fresh; there was no active conversation.",
+        )
+
+    @bot.message_handler(
+        commands=["session"], func=lambda message: getattr(message, "_authorized", False)
+    )
+    def session_status(message):
+        session = sessions.active(message.chat.id)
+        if session is None:
+            bot.reply_to(
+                message,
+                f"No active conversation. The next message starts one, "
+                f"which lasts {ttl_minutes} minutes of inactivity.",
+            )
+            return
+        remaining = session.expires_in(settings.session_ttl_seconds)
+        bot.reply_to(
+            message,
+            f"Conversation {session.session_id}\n"
+            f"Turns: {session.turns}\n"
+            f"Remembered messages: {len(session.messages)}\n"
+            f"Age: {int(session.age_seconds() // 60)} min\n"
+            f"Expires in: {int(remaining // 60)} min {int(remaining % 60)} s\n\n"
+            "Send /new to start over immediately.",
+        )
+
+    @bot.message_handler(
         func=lambda message: getattr(message, "_authorized", False) and bool(message.text)
     )
     def natural_language(message):
+        chat_id = message.chat.id
+        if not chat_locks[chat_id].acquire(blocking=False):
+            bot.reply_to(message, "I am still working on your previous request.")
+            return
+        try:
+            _handle_request(message)
+        finally:
+            chat_locks[chat_id].release()
+
+    def _handle_request(message):
         bot.send_chat_action(message.chat.id, "typing")
+        previous = sessions.active(message.chat.id)
         outcome = runtime.run(
             message.text,
             actor_id=str(message.from_user.id),
             chat_id=message.chat.id,
+            prior_messages=list(previous.messages) if previous else (),
         )
+        if outcome.status is not RunStatus.FAILED:
+            session = sessions.save(message.chat.id, outcome.messages)
+            if previous is None:
+                logger.info(
+                    "Opened session %s for chat %s", session.session_id, message.chat.id
+                )
         if outcome.status is RunStatus.APPROVAL_REQUIRED:
             for pending in outcome.pending_approvals:
                 record = approvals.create(
@@ -209,6 +321,26 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             chat_id=chat_id,
             run_id=record.run_id,
         )
+        # Record the outcome so the conversation knows the action happened.
+        # close_open_tool_calls already wrote a "not_executed" placeholder when
+        # the run paused, so this is appended as a plain observation rather
+        # than a second reply to the same tool call id.
+        session = sessions.active(chat_id)
+        if session is not None:
+            sessions.save(
+                chat_id,
+                [
+                    *session.messages,
+                    {
+                        "role": "assistant",
+                        "content": (
+                            f"The owner approved {record.pending.call.name}. "
+                            f"Result: {result.status} - {result.summary}"
+                        ),
+                    },
+                ],
+            )
+
         icon = "✅" if result.status == "ok" else "❌"
         bot.edit_message_text(
             f"{icon} {result.summary}",

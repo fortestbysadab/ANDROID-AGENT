@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -229,9 +230,44 @@ _LOCATION_HELP = (
     "that system location is switched on."
 )
 
+#: Android 12+ runs a "phantom process" monitor that SIGKILLs child processes
+#: forked by a backgrounded app. Every termux-* command forks a `termux-api`
+#: helper, and that helper owns the socket the Termux:API app replies on. When
+#: the monitor trims it, the app's ResultReturner fails with
+#: "java.io.IOException: Connection refused" and shows the owner a full-screen
+#: error. The agent cannot prevent that - only the device owner can, via
+#: Developer options > Disable child process restrictions (Android 14+).
+#: What the agent *can* do is stop firing requests that are already failing:
+#: each doomed live request is another error screen in the owner's face.
+_LIVE_COOLDOWN_SECONDS = 300.0
+_PHANTOM_HELP = (
+    "If Termux:API keeps showing a 'Connection refused' error, Android is "
+    "killing its helper processes in the background. Turn on Android Settings "
+    "> System > Developer options > Disable child process restrictions, then "
+    "reboot."
+)
+
 #: Termux:API handles one location request at a time. Serialise our own calls
 #: so two agent turns can never collide into a "Connection refused" failure.
 _location_lock = threading.Lock()
+#: monotonic deadline before which live fixes are not attempted at all.
+_live_blocked_until = 0.0
+
+
+def _live_requests_blocked() -> bool:
+    return time.monotonic() < _live_blocked_until
+
+
+def _note_live_outcome(*, succeeded: bool) -> None:
+    """Back off after a live request fails; clear the moment one works."""
+    global _live_blocked_until
+    _live_blocked_until = 0.0 if succeeded else time.monotonic() + _LIVE_COOLDOWN_SECONDS
+
+
+def reset_live_cooldown() -> None:
+    """Test and diagnostic hook."""
+    global _live_blocked_until
+    _live_blocked_until = 0.0
 
 
 def _location_disabled(reasons: Sequence[str]) -> bool:
@@ -376,18 +412,25 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
             fresh = dict(best, stale=False)
             return ToolResult.ok(_location_summary(fresh), fresh)
 
-        # 2. Ask for a live fix. Fast on screen, throttled off it.
+        # 2. Ask for a live fix. Fast on screen, throttled off it - and on a
+        #    device that kills background child processes, each attempt can
+        #    also throw a Termux:API error screen, so stop trying for a while
+        #    once one has failed.
         live: dict[str, Any] | None = None
-        for provider, seconds in plan:
-            data, reason = _location_read(provider, "once", seconds)
-            if data is None:
-                failures.append(f"{provider}: {reason}")
-                continue
-            candidate = _location_payload(data, provider, "once")
-            if live is None or _location_rank(candidate) < _location_rank(live):
-                live = candidate
-            if _location_metres(live) <= target:
-                break
+        if _live_requests_blocked():
+            failures.append("live fix skipped: recent attempts failed, backing off")
+        else:
+            for provider, seconds in plan:
+                data, reason = _location_read(provider, "once", seconds)
+                if data is None:
+                    failures.append(f"{provider}: {reason}")
+                    continue
+                candidate = _location_payload(data, provider, "once")
+                if live is None or _location_rank(candidate) < _location_rank(live):
+                    live = candidate
+                if _location_metres(live) <= target:
+                    break
+            _note_live_outcome(succeeded=live is not None)
 
         if live is not None:
             # A live fix beats a cached one even if the cached figure looks a
@@ -408,7 +451,7 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
             if _location_disabled(failures):
                 summary += " No live fix was possible: " + _LOCATION_OFF_HELP
             else:
-                summary += " " + _LOCATION_BACKGROUND_HELP
+                summary += " " + _LOCATION_BACKGROUND_HELP + " " + _PHANTOM_HELP
             return ToolResult.ok(summary, payload)
 
         data, reason = _location_read("passive", "last", _LOCATION_LAST_TIMEOUT)
@@ -421,7 +464,7 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     if _location_disabled(failures):
         help_text, code = _LOCATION_OFF_HELP, "location_services_off"
     else:
-        help_text = f"{_LOCATION_HELP} {_LOCATION_BACKGROUND_HELP}"
+        help_text = f"{_LOCATION_HELP} {_LOCATION_BACKGROUND_HELP} {_PHANTOM_HELP}"
         code = "location_unavailable"
     return ToolResult.error(
         f"{help_text} Tried - " + "; ".join(failures), code=code, retryable=True

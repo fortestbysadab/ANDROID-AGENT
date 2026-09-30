@@ -62,8 +62,27 @@ class FakeTermux:
             self.active -= 1
 
 
-def patched(responses):
-    return mock.patch.object(termux_extra, "_run", FakeTermux(responses))
+class patched:
+    """Patch the Termux shell-out and clear the live-request cooldown.
+
+    The cooldown is deliberately module-global state (a circuit breaker for a
+    device that keeps killing helper processes), so it has to be reset between
+    tests or one failing case silently changes the next one's behaviour.
+    """
+
+    def __init__(self, responses):
+        self.fake = FakeTermux(responses)
+        self.patcher = mock.patch.object(termux_extra, "_run", self.fake)
+
+    def __enter__(self):
+        termux_extra.reset_live_cooldown()
+        self.patcher.start()
+        return self.fake
+
+    def __exit__(self, *exc):
+        self.patcher.stop()
+        termux_extra.reset_live_cooldown()
+        return False
 
 
 class LocationSuccessTests(unittest.TestCase):
@@ -542,6 +561,78 @@ class BackgroundThrottlingTests(unittest.TestCase):
             if request == "last":
                 with self.subTest(provider=provider):
                     self.assertLessEqual(timeout, 10.0)
+
+
+class LiveRequestCooldownTests(unittest.TestCase):
+    """Stop firing live requests that are already failing.
+
+    On a device with Android's phantom-process monitor enabled, each stalled
+    termux-location call can end with the helper being SIGKILLed, which makes
+    the Termux:API app throw a full-screen "Connection refused" error at the
+    owner. Retrying on every message turns that into a stream of them.
+    """
+
+    STALLED: ClassVar[dict] = {"gps": (False, "termux-location timed out after 25s")}
+
+    def _cached(self, age_minutes=30):
+        return dict(FIX, provider="gps", accuracy=20.0, elapsedMs=age_minutes * 60 * 1000)
+
+    def test_a_second_request_skips_the_live_attempt(self):
+        responses = {
+            ("gps", "last"): (True, json.dumps(self._cached())),
+            ("gps", "once"): (False, "termux-location timed out after 25s"),
+            ("network", "once"): (False, "termux-location timed out after 10s"),
+        }
+        with patched(responses) as fake:
+            run()
+            self.assertGreater(len(live_calls(fake)), 0)
+            before = len(live_calls(fake))
+            run()
+            self.assertEqual(len(live_calls(fake)), before)
+
+    def test_the_backed_off_answer_is_still_the_cached_fix(self):
+        responses = {
+            ("gps", "last"): (True, json.dumps(self._cached())),
+            ("gps", "once"): (False, "termux-location timed out after 25s"),
+            ("network", "once"): (False, "termux-location timed out after 10s"),
+        }
+        with patched(responses):
+            run()
+            result = run()
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.data["stale"])
+
+    def test_a_successful_live_fix_clears_the_cooldown(self):
+        stalled = {
+            ("gps", "last"): (True, json.dumps(self._cached())),
+            ("gps", "once"): (False, "termux-location timed out after 25s"),
+            ("network", "once"): (False, "termux-location timed out after 10s"),
+        }
+        with patched(stalled):
+            run()
+        working = {("gps", "once"): (True, json.dumps(dict(FIX, accuracy=8.0)))}
+        with patched(working) as fake:  # patched() resets, as a fresh process would
+            run()
+            self.assertIn("gps", live_calls(fake))
+            run()
+            self.assertEqual(live_calls(fake).count("gps"), 2)
+
+    def test_cooldown_is_long_enough_to_matter_but_not_permanent(self):
+        self.assertGreaterEqual(termux_extra._LIVE_COOLDOWN_SECONDS, 60)
+        self.assertLessEqual(termux_extra._LIVE_COOLDOWN_SECONDS, 1800)
+
+    def test_the_backoff_is_reported_in_the_failure_list(self):
+        responses = {("gps", "once"): (False, "termux-location timed out after 25s")}
+        with patched(responses):
+            run()
+            result = run()
+        self.assertIn("backing off", result.summary)
+
+    def test_phantom_process_remedy_is_named(self):
+        with patched({("gps", "once"): (False, "termux-location timed out")}):
+            result = run()
+        self.assertIn("Disable child process restrictions", result.summary)
+        self.assertIn("Developer options", result.summary)
 
 
 class LocationSchemaTests(unittest.TestCase):

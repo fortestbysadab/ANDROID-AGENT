@@ -286,6 +286,29 @@ IP-address fallback** - it was tried and removed after it reported a city
 termux-wake-lock     # plus Settings > Apps > Termux > Battery > Unrestricted
 ```
 
+**Termux:API "Connection refused" errors**
+
+If a red *Termux:API Error* screen appears with
+`java.io.IOException: Connection refused` at `ResultReturner`, Android killed
+the `termux-api` helper process before the app could hand back its answer.
+Since Android 12 the OS monitors "phantom" processes - child processes forked
+by an app - and SIGKILLs them when the app is in the background. Check your
+device report: `MONITOR_PHANTOM_PROCS: true` means this is active.
+
+**The agent cannot prevent this.** Fix it on the device, once:
+
+- **Android 14+:** Settings > About phone > tap *Build number* seven times,
+  then Settings > System > Developer options > **Disable child process
+  restrictions**, then reboot. Leave Developer options enabled - turning it
+  off re-enables the killer.
+- **Android 12L/13:** `adb shell settings put global settings_enable_monitor_phantom_procs false`
+- Also set Settings > Apps > Termux > Battery > **Unrestricted**.
+
+What the agent does do is avoid making it worse: after a live location request
+fails, it stops attempting live requests for five minutes and answers from the
+cached fix instead. Each doomed attempt is another error screen, so retrying on
+every message would turn one failure into a stream of them.
+
 **Troubleshooting**
 
 ```sh

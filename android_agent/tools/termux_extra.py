@@ -249,6 +249,22 @@ _LOCATION_HELP = (
 #: What the agent *can* do is stop firing requests that are already failing:
 #: each doomed live request is another error screen in the owner's face.
 _LIVE_COOLDOWN_SECONDS = 300.0
+#: Signature of Android refusing location to a backgrounded app: the OS will
+#: not even hand over the *cached* fix, so `-r last` comes back with
+#: API_ERROR "Failed to get location" while the identical command from an
+#: on-screen Termux session returns a fix immediately. That is what
+#: "Allow only while using the app" does on Android 10+; a live request then
+#: never fires either, so every provider times out afterwards.
+_DENIED_CACHE_MARKERS = ("failed to get location", "response had no coordinates")
+
+_BACKGROUND_PERMISSION_HELP = (
+    "Android refused even the last known position, which is what happens when "
+    "Termux:API only has location permission 'while using the app'. Set "
+    "Android Settings > Apps > Termux:API > Permissions > Location to 'Allow "
+    "all the time', and do the same for Termux. Until then, location will work "
+    "from an on-screen Termux session but not from a chat."
+)
+
 _PHANTOM_HELP = (
     "If Termux:API keeps showing a 'Connection refused' error, Android is "
     "killing its helper processes in the background. Turn on Android Settings "
@@ -277,6 +293,17 @@ def reset_live_cooldown() -> None:
     """Test and diagnostic hook."""
     global _live_blocked_until
     _live_blocked_until = 0.0
+
+
+def _location_cache_denied(reasons: Sequence[str]) -> bool:
+    """True when the OS would not even return a cached fix.
+
+    Distinguishing this from "the GPS cannot get a fix" matters: a cold GPS
+    is a fact about the sky, while a refused cache is a permission setting
+    the owner can change in twenty seconds.
+    """
+    lowered = " ".join(reasons).lower()
+    return any(marker in lowered for marker in _DENIED_CACHE_MARKERS)
 
 
 def _location_disabled(reasons: Sequence[str]) -> bool:
@@ -494,6 +521,8 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
 
     if _location_disabled(failures):
         help_text, code = _LOCATION_OFF_HELP, "location_services_off"
+    elif _location_cache_denied(failures):
+        help_text, code = _BACKGROUND_PERMISSION_HELP, "location_permission_background"
     else:
         help_text = f"{_LOCATION_HELP} {_LOCATION_BACKGROUND_HELP} {_PHANTOM_HELP}"
         code = "location_unavailable"

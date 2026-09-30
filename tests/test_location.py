@@ -677,6 +677,70 @@ class LiveRequestCooldownTests(unittest.TestCase):
         self.assertIn("Developer options", result.summary)
 
 
+class BackgroundPermissionTests(unittest.TestCase):
+    """A refused cache is a permission setting, not a cold GPS.
+
+    Observed on the owner's device: from the bot, `-r last` returned
+    API_ERROR "Failed to get location" in 2.1s and every live provider then
+    timed out; from an on-screen Termux session the identical command
+    returned a 6.5 m fix in 1.0s. That asymmetry is what Android's
+    "while using the app" location permission produces.
+    """
+
+    DENIED: ClassVar[dict] = {
+        ("gps", "last"): (True, '{"API_ERROR": "Failed to get location"}'),
+        ("network", "last"): (True, '{"API_ERROR": "Failed to get location"}'),
+        ("gps", "once"): (False, "termux-location timed out after 12s"),
+        ("network", "once"): (False, "termux-location timed out after 8s"),
+        ("passive", "last"): (False, "termux-location timed out after 6s"),
+    }
+
+    def test_a_refused_cache_gets_its_own_error_code(self):
+        with patched(self.DENIED):
+            result = run()
+        self.assertEqual(result.error_code, "location_permission_background")
+
+    def test_the_remedy_names_the_exact_setting(self):
+        with patched(self.DENIED):
+            summary = run().summary
+        self.assertIn("Allow all the time", summary)
+        self.assertIn("Termux:API", summary)
+        self.assertIn("while using the app", summary)
+
+    def test_it_explains_why_the_terminal_works(self):
+        """The owner's first question every time: why does the shell work?"""
+        with patched(self.DENIED):
+            summary = run().summary
+        self.assertIn("on-screen Termux session", summary)
+
+    def test_a_plain_cold_gps_is_not_blamed_on_permissions(self):
+        """Cache empty but readable, GPS simply cannot fix."""
+        with patched({
+            ("gps", "last"): (True, ""),
+            ("network", "last"): (True, ""),
+            ("gps", "once"): (False, "termux-location timed out after 12s"),
+        }):
+            result = run()
+        self.assertEqual(result.error_code, "location_unavailable")
+        self.assertNotIn("Allow all the time", result.summary)
+
+    def test_location_switched_off_still_wins_the_diagnosis(self):
+        with patched({
+            ("gps", "last"): (True, '{"API_ERROR": "Failed to get location"}'),
+            ("gps", "once"): (False, "gps provider is disabled"),
+            ("network", "once"): (False, "network provider is disabled"),
+            ("passive", "last"): (False, "passive provider is disabled"),
+            ("network", "last"): (False, "network provider is disabled"),
+        }):
+            result = run()
+        self.assertEqual(result.error_code, "location_services_off")
+
+    def test_a_working_cached_fix_is_never_called_a_permission_problem(self):
+        with patched({("gps", "last"): (True, json.dumps(dict(FIX, accuracy=6.5)))}):
+            result = run()
+        self.assertEqual(result.status, "ok")
+
+
 class LocationSchemaTests(unittest.TestCase):
     def test_provider_enum_is_advertised_to_the_model(self):
         properties = spec().input_schema["properties"]

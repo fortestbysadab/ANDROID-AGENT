@@ -328,6 +328,33 @@ Measured on a realme RMP2402 (Android 14): a warm `-r once` GPS fix returns in
 12 seconds on that basis - long enough with a threefold margin, short enough
 that a GPS which cannot fix fails quickly.
 
+**"It works in the terminal but not from the bot"**
+
+Check the Termux:API location permission first. On Android 10+ the default is
+*Allow only while using the app*, and with that setting Android refuses
+location to a backgrounded app - it will not even hand over the **cached**
+position. The signature in the log is:
+
+```
+gps cached: Failed to get location (2.1s); network cached: Failed to get location
+```
+
+followed by every live provider timing out, while the identical command run
+from an on-screen Termux session returns a fix in about a second. The agent
+reports this as `location_permission_background`.
+
+Fix: Android Settings > Apps > **Termux:API** > Permissions > Location >
+**Allow all the time**, and the same for **Termux**. Confirm it with a test
+that outlives the few-second grace period Android gives an app that has just
+left the screen:
+
+```sh
+(sleep 60; date; termux-location -p gps -r last) > /sdcard/loctest.txt 2>&1 &
+```
+
+Press Home immediately, wait a minute, then read the file. A fix means
+background access is granted; `API_ERROR` means it is not.
+
 **Is it the GPS, or the way the agent spawns the command?**
 
 A single failure cannot tell you: a cold GPS and a spawn-style problem look

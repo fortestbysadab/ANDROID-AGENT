@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -375,13 +376,25 @@ def _location_summary(payload: Mapping[str, Any]) -> str:
 def _location_cached(
     providers: tuple[str, ...], target: float
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    """Read the last known fix from each provider. Never throttled, instant."""
+    """Read the last known fix from each provider. Never throttled, instant.
+
+    A cached read that is slow at all is a finding in itself: it means
+    Termux:API is not answering, rather than the GPS being unable to fix.
+    """
     best: dict[str, Any] | None = None
     failures: list[str] = []
     for provider in providers:
+        began = time.monotonic()
         data, reason = _location_read(provider, "last", _LOCATION_LAST_TIMEOUT)
+        elapsed = time.monotonic() - began
+        if elapsed > 2.0:
+            logger.warning(
+                "Cached %s read took %.1fs - Termux:API is not answering promptly",
+                provider,
+                elapsed,
+            )
         if data is None:
-            failures.append(f"{provider} cached: {reason}")
+            failures.append(f"{provider} cached: {reason} ({elapsed:.1f}s)")
             continue
         candidate = _location_payload(data, provider, "last")
         if best is None or _location_rank(candidate) < _location_rank(best):
@@ -394,6 +407,9 @@ def _location_cached(
 def _location_fresh(payload: Mapping[str, Any]) -> bool:
     age = payload.get("fix_age_seconds")
     return isinstance(age, (int, float)) and age <= _LOCATION_FRESH_SECONDS
+
+
+logger = logging.getLogger(__name__)
 
 
 def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
@@ -417,6 +433,7 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
             or ((str(requested), 25.0),)
 
     failures: list[str] = []
+    started = time.monotonic()
 
     with _location_lock:
         # 1. Recent cached fix: instant, and works with Termux in background.
@@ -480,6 +497,15 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     else:
         help_text = f"{_LOCATION_HELP} {_LOCATION_BACKGROUND_HELP} {_PHANTOM_HELP}"
         code = "location_unavailable"
+    # One line carrying the whole attempt sequence. Without it, diagnosing a
+    # failure means correlating individual subprocess warnings by timestamp
+    # and guessing which step each belonged to.
+    logger.warning(
+        "get_location gave up after %.1fs (precision=%s): %s",
+        time.monotonic() - started,
+        precision,
+        "; ".join(failures) or "no attempts recorded",
+    )
     return ToolResult.error(
         f"{help_text} Tried - " + "; ".join(failures), code=code, retryable=True
     )

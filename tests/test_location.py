@@ -9,6 +9,7 @@ The old implementation turned all of them into one unhelpful error.
 from __future__ import annotations
 
 import json
+import time
 import unittest
 from typing import ClassVar
 from unittest import mock
@@ -554,6 +555,34 @@ class BackgroundThrottlingTests(unittest.TestCase):
         with patched({("gps", "last"): (True, json.dumps(recent))}) as fake:
             run()
         self.assertEqual(len(fake.calls), 1)
+
+    def test_giving_up_logs_the_whole_attempt_sequence(self):
+        """One line, so a failure needs no timestamp archaeology."""
+        with patched({}), self.assertLogs("android_agent.tools.termux_extra", "WARNING") as logs:
+            run()
+        summary = "\n".join(logs.output)
+        self.assertIn("get_location gave up", summary)
+        self.assertIn("gps", summary)
+        self.assertIn("network", summary)
+        self.assertIn("precision=balanced", summary)
+
+    def test_a_slow_cached_read_is_called_out(self):
+        """A cached read is instant unless Termux:API itself is not answering."""
+        def slow(fake):
+            time.sleep(2.1)
+            return (True, "")
+
+        responses = {("gps", "last"): slow}
+        with patched(responses), self.assertLogs(
+            "android_agent.tools.termux_extra", "WARNING"
+        ) as logs:
+            run()
+        self.assertIn("Termux:API is not answering promptly", "\n".join(logs.output))
+
+    def test_the_failure_list_records_how_long_each_cached_read_took(self):
+        with patched({}):
+            result = run()
+        self.assertRegex(result.summary, r"cached: .*\(\d+\.\ds\)")
 
     def test_location_reads_never_kill_a_timed_out_client(self):
         """Killing it is what produces the Termux:API error screen."""

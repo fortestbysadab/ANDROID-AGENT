@@ -20,6 +20,10 @@ packages = ["android_agent"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+# The v1 bot is kept at the repo root for reference only. It is not imported by
+# the v2 package and is deliberately left unlinted (config.py is a template with
+# placeholder values and is not even valid Python until the user fills it in).
+extend-exclude = ["bot.py", "config.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "S", "RUF"]

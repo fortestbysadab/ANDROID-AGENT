@@ -54,7 +54,13 @@ class Settings:
     needle_confidence_threshold: float = 0.85
 
     @classmethod
-    def from_env(cls) -> Settings:
+    def from_env(cls, *, require_telegram: bool = True) -> Settings:
+        """Read and validate settings from the environment.
+
+        ``require_telegram`` is False for front ends that do not talk to
+        Telegram (the local web console), so a web-only install does not have
+        to invent a bot token it will never use.
+        """
         load_dotenv()
 
         token = os.environ.get("ANDROID_AGENT_BOT_TOKEN", "").strip()
@@ -66,16 +72,14 @@ class Settings:
         if base_url.lower() in KNOWN_ENDPOINTS:
             base_url = KNOWN_ENDPOINTS[base_url.lower()]
 
-        missing = [
-            name
-            for name, value in (
-                ("ANDROID_AGENT_BOT_TOKEN", token),
-                ("ANDROID_AGENT_OWNER_CHAT_ID", owner),
-                ("ANDROID_AGENT_LLM_BASE_URL", base_url),
-                ("ANDROID_AGENT_LLM_MODEL", model),
-            )
-            if not value
+        required: list[tuple[str, str]] = [
+            ("ANDROID_AGENT_OWNER_CHAT_ID", owner),
+            ("ANDROID_AGENT_LLM_BASE_URL", base_url),
+            ("ANDROID_AGENT_LLM_MODEL", model),
         ]
+        if require_telegram:
+            required.insert(0, ("ANDROID_AGENT_BOT_TOKEN", token))
+        missing = [name for name, value in required if not value]
         if missing:
             raise ValueError("Missing required environment variables: " + ", ".join(missing))
 

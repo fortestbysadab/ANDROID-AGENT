@@ -1,10 +1,12 @@
 # Android Agent
 
-A Telegram-controlled Android/Termux assistant. The repository currently contains:
+An Android/Termux assistant you drive from Telegram or a browser. The
+repository currently contains:
 
 - `bot.py` — the original command bot.
 - `agent_bot.py` — a clean v2, provider-neutral agent runtime under active migration.
 - `android_agent/` — typed tools, deterministic policy, bounded agent loop, model adapters, and audit support.
+- `android_agent/web/` — a local web console (`python -m android_agent.web`) over the same runtime.
 - `docs/AGENT_ARCHITECTURE.md` — researched architecture and migration plan.
 
 Screen recording is intentionally out of scope.
@@ -91,6 +93,52 @@ provider reject the next request:
 
 Only one run executes per chat at a time; a second message while one is in
 flight is rejected rather than interleaved.
+
+## Web console
+
+Telegram is optional. The same agent also runs as a local web UI:
+
+```bash
+# Generate a token once and put it in .env
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+python -m android_agent.web          # http://127.0.0.1:8765
+```
+
+It is **not** a second privileged path. The UI is a thin client over the same
+`AgentRuntime`, policy engine, approval store and audit log the bot uses, so a
+dangerous tool still shows an Approve / Deny card and still lands in
+`audit.jsonl`. Its conversation is stored under a separate session key, so the
+web and Telegram histories never bleed into each other.
+
+Security properties, since this can end up on the public internet:
+
+- The server **refuses to start** without `ANDROID_AGENT_WEB_TOKEN`, and
+  rejects short or placeholder tokens.
+- Login exchanges the token for a random session id in an `HttpOnly`,
+  `Secure`, `SameSite=Strict` cookie. The token itself is never stored in the
+  browser and never appears in a URL.
+- Every `/api` call must also carry an `X-Android-Agent` header, which a
+  cross-site page cannot add — CSRF protection independent of the cookie.
+- Failed logins are rate limited and lock the client out after five attempts.
+- Media is served only from the media root, by filename, with traversal and
+  symlink escapes rejected.
+
+Bind it to `127.0.0.1` (the default) and expose it with a tunnel rather than
+opening a port:
+
+```bash
+cloudflared tunnel --url http://localhost:8765
+```
+
+Anyone holding the tunnel URL **and** the token can control the phone. Rotate
+the token by editing `.env` and restarting.
+
+### Running both front ends
+
+`agent_bot.py` and `python -m android_agent.web` are separate processes and can
+run side by side. They share the audit log and the approval semantics, but keep
+independent conversations.
 
 ## Captured media
 
@@ -192,8 +240,8 @@ Audit metadata is written to `~/telegram_agent_v2/audit.jsonl`. Tool arguments a
 ## Test
 
 ```sh
-python -m unittest discover -s tests -v   # 49 tests, no network required
-ruff check android_agent tests agent_bot.py
+python -m unittest discover -s tests -v   # 156 tests, no network required
+ruff check .
 ```
 
 See [the architecture blueprint](docs/AGENT_ARCHITECTURE.md) for policy tiers, approvals, skills, Needle integration, evaluation, and the phased migration plan.

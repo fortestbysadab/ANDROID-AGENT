@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import subprocess
+import threading
 from collections.abc import Mapping
 from typing import Any
 
@@ -42,7 +43,36 @@ def _kill_group(process: subprocess.Popen) -> None:
         pass
 
 
-def _run(args: list[str], timeout: float = 12.0) -> tuple[bool, str]:
+#: How long an abandoned command is allowed to keep running before it is
+#: reaped. Long enough for Termux:API to deliver its answer to a client that
+#: is still listening; short enough that nothing lingers for good.
+_ABANDON_GRACE_SECONDS = 120.0
+
+
+def _abandon(process: subprocess.Popen, args: list[str]) -> None:
+    """Stop waiting for a command without killing it.
+
+    Killing a timed-out termux-* command is what makes the Termux:API app
+    show the owner a full-screen "Connection refused" error: the app finishes
+    the work, tries to hand the result back, and finds the socket gone. If we
+    simply walk away instead, the client stays alive to receive the answer and
+    exits on its own, and the owner sees nothing. A watchdog reaps it later in
+    the case where the answer never comes.
+    """
+    def reap() -> None:
+        try:
+            process.wait(timeout=_ABANDON_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warning("%s never finished; reaping after %.0fs",
+                           args[0], _ABANDON_GRACE_SECONDS)
+            _kill_group(process)
+
+    threading.Thread(target=reap, name=f"reap-{args[0]}", daemon=True).start()
+
+
+def _run(
+    args: list[str], timeout: float = 12.0, *, kill_on_timeout: bool = True
+) -> tuple[bool, str]:
     try:
         process = subprocess.Popen(
             args,
@@ -60,11 +90,13 @@ def _run(args: list[str], timeout: float = 12.0) -> tuple[bool, str]:
     try:
         raw_out, raw_err = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_group(process)
-        # Worth a warning, not a debug line: killing the client is also what
-        # makes the Termux:API app fail to deliver and show the owner a
-        # "Connection refused" error screen.
-        logger.warning("%s timed out after %.0fs and was killed", " ".join(args), timeout)
+        if kill_on_timeout:
+            _kill_group(process)
+            logger.warning("%s timed out after %.0fs and was killed", " ".join(args), timeout)
+        else:
+            _abandon(process, args)
+            logger.warning("%s timed out after %.0fs; abandoned, not killed",
+                           " ".join(args), timeout)
         return False, f"{args[0]} timed out after {timeout:.0f}s"
     except OSError as exc:
         _kill_group(process)

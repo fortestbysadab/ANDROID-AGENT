@@ -50,7 +50,8 @@ class FakeTermux:
         self.active = 0
         self.max_concurrent = 0
 
-    def __call__(self, args, timeout=12.0):
+    def __call__(self, args, timeout=12.0, **kwargs):
+        self.kwargs = kwargs
         provider, request = args[2], args[4]
         self.active += 1
         self.max_concurrent = max(self.max_concurrent, self.active)
@@ -553,6 +554,18 @@ class BackgroundThrottlingTests(unittest.TestCase):
         with patched({("gps", "last"): (True, json.dumps(recent))}) as fake:
             run()
         self.assertEqual(len(fake.calls), 1)
+
+    def test_location_reads_never_kill_a_timed_out_client(self):
+        """Killing it is what produces the Termux:API error screen."""
+        with patched({}) as fake:
+            run()
+        self.assertEqual(fake.kwargs.get("kill_on_timeout"), False)
+
+    def test_gps_budget_leaves_margin_over_the_measured_fix_time(self):
+        """A warm -r once fix was measured at 2.7-4.5s on the target device."""
+        balanced_gps = dict(termux_extra._LOCATION_PLAN["balanced"])["gps"]
+        self.assertGreaterEqual(balanced_gps, 10.0)
+        self.assertLessEqual(balanced_gps, 20.0)
 
     def test_cached_reads_use_a_short_timeout(self):
         with patched({}) as fake:

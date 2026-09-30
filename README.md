@@ -309,10 +309,24 @@ device report: `MONITOR_PHANTOM_PROCS: true` means this is active.
 - **Android 12L/13:** `adb shell settings put global settings_enable_monitor_phantom_procs false`
 - Also set Settings > Apps > Termux > Battery > **Unrestricted**.
 
-What the agent does do is avoid making it worse: after a live location request
+There is a second, more common cause that **is** the agent's doing, and it is
+now fixed: when a `termux-*` command timed out, the agent killed it. The
+Termux:API app finishes the work anyway, tries to hand the result back, finds
+the socket gone, and shows the error. Location commands are now **abandoned
+rather than killed** on timeout - the client stays alive to receive the answer
+and exits on its own, so nothing is shown - with a watchdog reaping it after
+two minutes if the answer never arrives.
+
+The agent also avoids making things worse: after a live location request
 fails, it stops attempting live requests for five minutes and answers from the
 cached fix instead. Each doomed attempt is another error screen, so retrying on
 every message would turn one failure into a stream of them.
+
+Measured on a realme RMP2402 (Android 14): a warm `-r once` GPS fix returns in
+2.7-4.5 seconds whether spawned from a shell or the way the agent spawns it
+(pipes, closed stdin, setsid make no difference). The balanced GPS budget is
+12 seconds on that basis - long enough with a threefold margin, short enough
+that a GPS which cannot fix fails quickly.
 
 **Is it the GPS, or the way the agent spawns the command?**
 

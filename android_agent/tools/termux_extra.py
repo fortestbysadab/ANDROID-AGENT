@@ -174,9 +174,15 @@ def _call_state() -> str | None:
 #: time, so firing GPS and network together makes the second fail and throws a
 #: "Connection refused" Termux:API Error screen at the owner.
 #: (provider, seconds) pairs for a *fresh* fix, tried in order, per precision.
+#: Measured on the target device: a working `-r once` GPS fix returns in
+#: 2.7-4.5 seconds, warm. The old 25s balanced budget therefore bought nothing
+#: except a longer wait before failing - and every timeout kills a client that
+#: Termux:API is still trying to answer. 12s keeps a threefold margin over the
+#: measured time while failing fast when GPS genuinely cannot fix. 'precise'
+#: keeps a long budget for a real cold start outdoors.
 _LOCATION_PLAN = {
     "fast": (("gps", 8.0), ("network", 6.0)),
-    "balanced": (("gps", 25.0), ("network", 10.0)),
+    "balanced": (("gps", 12.0), ("network", 8.0)),
     "precise": (("gps", 60.0), ("network", 10.0)),
 }
 #: Accuracy that ends the search immediately, per precision level.
@@ -286,7 +292,13 @@ def _location_read(provider: str, request: str, timeout: float):
     object with an API_ERROR key. Treating either as data is how a caller
     ends up reporting "invalid device data" for a simple missing permission.
     """
-    ok, output = _run(["termux-location", "-p", provider, "-r", request], timeout=timeout)
+    # Abandon rather than kill: a killed client is what makes Termux:API throw
+    # a "Connection refused" error screen at the owner.
+    ok, output = _run(
+        ["termux-location", "-p", provider, "-r", request],
+        timeout=timeout,
+        kill_on_timeout=False,
+    )
     if not ok:
         return None, output
     if not output.strip():

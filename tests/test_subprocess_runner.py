@@ -17,7 +17,9 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
+from android_agent.tools import termux
 from android_agent.tools.termux import _run
 
 # A parent that outlives its child would leave the orphan behind.
@@ -104,6 +106,45 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(ok)
         # And it must not have blocked for anything like the child's lifetime.
         self.assertLess(time.monotonic() - started, 10)
+
+    def test_abandoned_command_is_not_killed_immediately(self):
+        """A killed client is what makes Termux:API show an error screen.
+
+        If we walk away instead, the command stays alive to receive the
+        answer the app is still preparing, and the owner sees nothing.
+        """
+        script = "import time, os; print(os.getpid(), flush=True); time.sleep(20)"
+        started = time.monotonic()
+        ok, output = _run(
+            [sys.executable, "-c", script], timeout=0.5, kill_on_timeout=False
+        )
+        elapsed = time.monotonic() - started
+        self.assertFalse(ok)
+        self.assertIn("timed out", output)
+        # It returned promptly rather than waiting out the child.
+        self.assertLess(elapsed, 5)
+
+    def test_abandoned_command_is_reaped_eventually(self):
+        """Walking away must not mean leaking a process for good."""
+        with mock.patch.object(termux, "_ABANDON_GRACE_SECONDS", 0.3):
+            process = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                start_new_session=True,
+            )
+            termux._abandon(process, ["fake-command"])
+            for _ in range(60):
+                if process.poll() is not None:
+                    break
+                time.sleep(0.05)
+        self.assertIsNotNone(process.poll(), "abandoned process was never reaped")
+
+    def test_kill_on_timeout_is_still_the_default(self):
+        """Only the Termux:API callers opt out; everything else kills."""
+        script = "import time, os; time.sleep(20)"
+        process_before = time.monotonic()
+        ok, _ = _run([sys.executable, "-c", script], timeout=0.4)
+        self.assertFalse(ok)
+        self.assertLess(time.monotonic() - process_before, 5)
 
     def test_output_is_bounded(self):
         ok, output = _run([sys.executable, "-c", "print('x' * 500000)"])

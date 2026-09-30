@@ -131,8 +131,14 @@ def adb_tools() -> list[ToolSpec]:
     no_args = {"type": "object", "properties": {}, "additionalProperties": False}
     def integer(minimum, maximum):
         return {"type": "integer", "minimum": minimum, "maximum": maximum}
-    key_names = ["home", "back", "recents", "power", "volume_up", "volume_down", "enter", "delete", "play", "pause"]
-    key_codes = {"home": 3, "back": 4, "recents": 187, "power": 26, "volume_up": 24, "volume_down": 25, "enter": 66, "delete": 67, "play": 126, "pause": 127}
+    # Android KEYCODE_* values. Kept in sync with the key set the legacy bot
+    # exposed via /keyevent so nothing the owner relied on disappeared.
+    key_codes = {
+        "home": 3, "back": 4, "recents": 187, "power": 26,
+        "volume_up": 24, "volume_down": 25, "menu": 82, "camera": 27,
+        "enter": 66, "delete": 67, "play": 126, "pause": 127,
+    }
+    key_names = sorted(key_codes)
     return [
         ToolSpec("get_adb_status", "Check whether same-device wireless ADB is connected. Use before explaining why an ADB-only action failed. This performs no device action.", no_args, Risk.READ_ONLY, _adb_status, idempotent=True),
         ToolSpec("capture_screenshot", "Capture the current Android screen and send the resulting PNG to Telegram. Use only when the owner explicitly asks for a screenshot or to see the current screen. This is a sensitive read of visible screen content.", no_args, Risk.SENSITIVE_READ, _screenshot),
@@ -161,7 +167,7 @@ def adb_tools() -> list[ToolSpec]:
         ),
         ToolSpec(
             "send_key_event",
-            "Send one named Android navigation or media key. Use for explicit requests such as go home, go back, show recents, press enter, or change volume with a key. Wireless ADB must be connected.",
+            "Send one named Android navigation, menu or media key. Use for explicit requests such as go home, go back, show recents, open the menu, press enter, or change volume with a key. Wireless ADB must be connected.",
             {"type": "object", "properties": {"key": {"type": "string", "enum": key_names}}, "required": ["key"], "additionalProperties": False},
             Risk.RAW_CONTROL,
             _simple_shell(lambda a: ["input", "keyevent", str(key_codes[a["key"]])], lambda a: f"Sent {a['key']} key."),

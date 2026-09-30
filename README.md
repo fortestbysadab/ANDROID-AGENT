@@ -236,6 +236,49 @@ warning and runs cloud-only; enabling the flag can never break the bot. For
 native Android builds see
 [`needle build --platform android-arm64`](https://cactuscompute.com/blog/needle-supported-devices).
 
+### Location
+
+`get_location` asks **GPS first, on its own**, and falls back to network
+positioning only if GPS gives nothing. Two hard-won reasons for that shape:
+
+- **GPS is the only precise source.** On a real device GPS reports ~8 m while
+  the network provider reports ~800 m, and the two can sit 2 km apart. Network
+  positioning is 15-150 m only when Wi-Fi contributes; on cell towers alone it
+  is 600 m to several kilometres.
+- **Termux:API serves one location request at a time.** Asking GPS and network
+  together makes it fail to deliver its answer, which surfaces as a
+  full-screen `Termux:API Error - java.io.IOException: Connection refused`.
+  Requests are serialised with a lock so two agent turns cannot collide.
+
+Related: a timed-out command is killed by **process group**, not just the
+wrapper process. Every `termux-*` command spawns a `termux-api` helper that
+owns the socket the Termux:API app replies on; killing only the wrapper leaves
+that helper orphaned and produces the same "Connection refused" error screen.
+
+With a warm GPS this returns in about a second. `precision` controls how long
+a cold GPS is given: `fast` 8s, `balanced` (default) 25s, `precise` 60s.
+
+Any fix wider than 300 m is flagged `approximate`, and the reply says so
+rather than presenting a kilometre-wide circle as your position. If nothing
+answers, the last known fix is returned labelled stale with its age. If
+location is off the error is `location_services_off`, which names the real
+problem.
+
+There is **no IP-address fallback**. It was tried and removed: it reported a
+city 100 km away while the device's own GPS was working fine, which is worse
+than no answer. No tool in this project contacts a third-party service.
+
+**Troubleshooting**
+
+```sh
+termux-location -p gps -r once      # compare "accuracy" between the two
+termux-location -p network -r once
+```
+
+If those work in the terminal but the agent does not, check `agent.log` for
+the timeout used - a cold GPS outdoors can exceed `fast`. Indoors GPS often
+never fixes at all; that is Android, not the agent.
+
 ### Phone calls
 
 `termux-telephony-call` often exits 0 while doing nothing, so a naive

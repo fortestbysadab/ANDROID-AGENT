@@ -290,6 +290,123 @@ class LocationFailureTests(unittest.TestCase):
         self.assertIn(("passive", "last"), attempted)
 
 
+class RealDeviceTests(unittest.TestCase):
+    """Reproduces the exact readings from the owner's phone.
+
+    GPS: 8 m at 22.364643, 87.999725. Network: 800 m at 22.378115, 87.985383.
+    The two are about 1.8 km apart, which is the error that was reported.
+    """
+
+    GPS: ClassVar[dict] = {
+        "latitude": 22.364643333333333, "longitude": 87.999725, "altitude": -53.7,
+        "accuracy": 8.0, "vertical_accuracy": 61.5, "bearing": 309.87,
+        "speed": 7.1016, "elapsedMs": 120, "provider": "gps",
+    }
+    NETWORK: ClassVar[dict] = {
+        "latitude": 22.3781152, "longitude": 87.9853832, "altitude": 0.0,
+        "accuracy": 800.0, "vertical_accuracy": 0.0, "bearing": 0.0,
+        "speed": 0.0, "elapsedMs": 11, "provider": "network",
+    }
+
+    def test_the_gps_reading_is_the_one_reported(self):
+        with patched({
+            ("gps", "once"): (True, json.dumps(self.GPS)),
+            ("network", "once"): (True, json.dumps(self.NETWORK)),
+        }):
+            result = run()
+        self.assertEqual(result.data["provider"], "gps")
+        self.assertAlmostEqual(result.data["latitude"], 22.364643333333333)
+        self.assertEqual(result.data["accuracy"], 8.0)
+        self.assertFalse(result.data["approximate"])
+        self.assertIn("8 m", result.summary)
+
+    def test_the_800m_network_reading_would_be_flagged_on_its_own(self):
+        with patched({
+            ("network", "once"): (True, json.dumps(self.NETWORK)),
+            ("gps", "once"): (True, ""),
+        }):
+            result = run()
+        self.assertTrue(result.data["approximate"])
+        self.assertIn("800 m", result.summary)
+        self.assertIn("coarse", result.summary.lower())
+
+    def test_gps_wins_a_tie_on_stated_accuracy(self):
+        """Ranking preference, independent of who replied first.
+
+        The race deliberately stops early on any fix that already meets the
+        accuracy target - an 8 m network fix is genuinely good enough and not
+        worth another 60 seconds of GPS. The tie-break decides only between
+        results that are both already in hand.
+        """
+        gps = termux_extra._location_payload(self.GPS, "gps", "once")
+        network = termux_extra._location_payload(
+            dict(self.NETWORK, accuracy=8.0), "network", "once"
+        )
+        self.assertLess(termux_extra._location_rank(gps), termux_extra._location_rank(network))
+
+    def test_a_coarse_network_fix_does_not_stop_the_race(self):
+        """800 m misses the balanced target, so GPS must still be awaited."""
+        with patched({
+            ("network", "once"): (True, json.dumps(self.NETWORK)),
+            ("gps", "once"): (True, json.dumps(self.GPS)),
+        }) as fake:
+            result = run()
+        self.assertEqual(result.data["provider"], "gps")
+        self.assertIn("gps", [call[0] for call in fake.calls])
+
+
+class LocationServicesOffTests(unittest.TestCase):
+    """Location switched off is a distinct condition with a distinct answer."""
+
+    DISABLED = (False, "gps provider is disabled")
+
+    def test_disabled_providers_produce_a_specific_error(self):
+        with patched({
+            ("gps", "once"): self.DISABLED,
+            ("network", "once"): self.DISABLED,
+            ("gps", "last"): self.DISABLED,
+            ("network", "last"): self.DISABLED,
+            ("passive", "last"): self.DISABLED,
+        }):
+            result = run()
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.error_code, "location_services_off")
+        self.assertIn("Location services appear to be switched off", result.summary)
+        self.assertIn("quick settings", result.summary)
+
+    def test_a_generic_failure_is_not_blamed_on_the_location_switch(self):
+        with patched({}):
+            result = run()
+        self.assertEqual(result.error_code, "location_unavailable")
+        self.assertNotIn("switched off", result.summary)
+
+    def test_cached_fix_is_used_as_the_fallback_when_location_is_off(self):
+        cached = dict(FIX, accuracy=40.0, elapsedMs=8 * 60 * 1000, provider="gps")
+        with patched({
+            ("gps", "once"): self.DISABLED,
+            ("network", "once"): self.DISABLED,
+            ("gps", "last"): (True, json.dumps(cached)),
+        }):
+            result = run()
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.data["stale"])
+        self.assertTrue(result.data["live_fix_failed"])
+        self.assertIn("last known fix", result.summary)
+        self.assertIn("8 min old", result.summary)
+        self.assertIn("switched off", result.summary)
+
+    def test_a_live_fix_is_never_marked_as_a_failed_one(self):
+        with patched({("network", "once"): (True, json.dumps(FIX))}):
+            result = run()
+        self.assertNotIn("live_fix_failed", result.data)
+
+    def test_cached_fallback_is_tried_for_every_provider(self):
+        with patched({}) as fake:
+            run()
+        cached = [provider for provider, request, _ in fake.calls if request == "last"]
+        self.assertEqual(cached, ["gps", "network", "passive"])
+
+
 class LocationSchemaTests(unittest.TestCase):
     def test_provider_enum_is_advertised_to_the_model(self):
         properties = spec().input_schema["properties"]

@@ -6,7 +6,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
@@ -195,12 +195,34 @@ _LOCATION_PRECISION = {
     "precise": (25.0, 70.0),
 }
 
+#: termux-location surfaces a switched-off provider as one of these, rather
+#: than as a distinct exit code.
+_LOCATION_DISABLED_MARKERS = (
+    "provider is disabled",
+    "provider disabled",
+    "not enabled",
+    "location is disabled",
+    "no location provider",
+)
+
+_LOCATION_OFF_HELP = (
+    "Location services appear to be switched off. Turn on Location in the "
+    "Android quick settings (and for a precise fix set it to High accuracy), "
+    "then ask again."
+)
+
 _LOCATION_HELP = (
     "No location fix. Check that the Termux:API app is installed, that it has "
     "the Location permission (Settings > Apps > Termux:API > Permissions), and "
     "that system location is switched on. Indoors, GPS often never gets a fix - "
     "try provider 'network'."
 )
+
+
+def _location_disabled(reasons: Sequence[str]) -> bool:
+    """True when every attempt failed the way a switched-off provider fails."""
+    lowered = " ".join(reasons).lower()
+    return any(marker in lowered for marker in _LOCATION_DISABLED_MARKERS)
 
 
 def _location_read(provider: str, request: str, timeout: float):
@@ -252,10 +274,21 @@ def _location_payload(data: Mapping[str, Any], provider: str, request: str) -> d
     return payload
 
 
-def _location_accuracy(payload: Mapping[str, Any]) -> float:
-    """Sort key: a fix with no stated accuracy is treated as the worst."""
+def _location_metres(payload: Mapping[str, Any]) -> float:
+    """Stated horizontal accuracy in metres; unknown counts as the worst."""
     accuracy = payload.get("accuracy")
     return float(accuracy) if isinstance(accuracy, (int, float)) else float("inf")
+
+
+def _location_rank(payload: Mapping[str, Any]) -> tuple[float, int]:
+    """Sort key: tighter accuracy wins; GPS breaks ties.
+
+    A fix with no stated accuracy is treated as the worst possible. The GPS
+    tie-break matters when two providers both report, say, 100 m: the GPS
+    figure is a real horizontal estimate, while the network one is a guess
+    about a radio cell.
+    """
+    return (_location_metres(payload), 0 if str(payload.get("provider")) == "gps" else 1)
 
 
 def _location_summary(payload: Mapping[str, Any]) -> str:
@@ -307,10 +340,10 @@ def _location_race(providers: tuple[str, ...], target_accuracy: float, deadline:
                     failures.append(f"{provider}: {reason}")
                     continue
                 candidate = _location_payload(data, provider, "once")
-                if best is None or _location_accuracy(candidate) < _location_accuracy(best):
+                if best is None or _location_rank(candidate) < _location_rank(best):
                     best = candidate
                 # Good enough, or out of time: stop waiting for the stragglers.
-                if _location_accuracy(best) <= target_accuracy or time.monotonic() >= finish_by:
+                if _location_metres(best) <= target_accuracy or time.monotonic() >= finish_by:
                     break
         except FuturesTimeout:
             failures.append(f"timed out after {deadline:.0f}s waiting for a fix")
@@ -343,17 +376,24 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     if best is not None:
         return ToolResult.ok(_location_summary(best), best)
 
-    # Nothing fresh. A cached fix still answers "roughly where is my phone".
+    # Nothing fresh - which is exactly what happens when location is switched
+    # off. A cached fix from before it was turned off still answers "roughly
+    # where is my phone", as long as it is labelled honestly.
     for provider in ("gps", "network", "passive"):
         data, reason = _location_read(provider, "last", _LOCATION_LAST_TIMEOUT)
         if data is not None:
             payload = _location_payload(data, provider, "last")
-            return ToolResult.ok(_location_summary(payload), payload)
+            payload["live_fix_failed"] = True
+            summary = _location_summary(payload)
+            if _location_disabled(failures):
+                summary += " No live fix was possible: " + _LOCATION_OFF_HELP
+            return ToolResult.ok(summary, payload)
         failures.append(f"{provider} cached: {reason}")
 
+    help_text = _LOCATION_OFF_HELP if _location_disabled(failures) else _LOCATION_HELP
     return ToolResult.error(
-        f"{_LOCATION_HELP} Tried - " + "; ".join(failures),
-        code="location_unavailable",
+        f"{help_text} Tried - " + "; ".join(failures),
+        code="location_services_off" if _location_disabled(failures) else "location_unavailable",
         retryable=True,
     )
 

@@ -314,6 +314,19 @@ fails, it stops attempting live requests for five minutes and answers from the
 cached fix instead. Each doomed attempt is another error screen, so retrying on
 every message would turn one failure into a stream of them.
 
+**Is it the GPS, or the way the agent spawns the command?**
+
+A single failure cannot tell you: a cold GPS and a spawn-style problem look
+identical from outside. This runs every variant back to back, so the GPS state
+is held constant and only the spawn differs:
+
+```sh
+python scripts/probe_location.py
+```
+
+Run it once with Termux on screen and once with Termux in the background. It
+prints how to read the result.
+
 **Troubleshooting**
 
 ```sh
@@ -343,9 +356,13 @@ being passed as a single argv element.
 Audit metadata is written to `~/telegram_agent_v2/audit.jsonl`. Tool arguments and secrets are never included. Failed tool calls record their `error_code` and `retryable` flag so a failure can be diagnosed after the fact without reproducing it; the human-readable summary is excluded because it can quote device content. To see why a tool failed:
 
 ```sh
-grep '"event": "tool.failed"' ~/telegram_agent_v2/audit.jsonl | tail -20
-grep -iE 'termux-|timed out|exited' ~/telegram_agent_v2/agent.log | tail -40
+# Note: the audit file is compact JSON, so there is no space after the colon.
+grep 'tool.failed' ~/telegram_agent_v2/audit.jsonl | tail -20
+grep -iE 'termux-[a-z]+ ' ~/telegram_agent_v2/agent.log | tail -40
 ```
+
+Avoid grepping the log for `timed out` alone: Telegram's own polling errors use
+that phrase constantly and will bury the tool lines.
 
 
 ## Test

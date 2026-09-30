@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
@@ -173,11 +176,24 @@ def _call_state() -> str | None:
 #: people expect: a cold start routinely takes 60-75 seconds because the
 #: receiver has to download almanac data, and Termux cannot wake a sleeping
 #: GPS by itself. Network fixes come back in seconds when there is signal.
-_LOCATION_ONCE_TIMEOUTS = {"gps": 45.0, "network": 20.0, "passive": 8.0}
+_LOCATION_ONCE_TIMEOUTS = {"gps": 60.0, "network": 25.0, "passive": 8.0}
 #: A cached fix is either instant or useless, so it gets a short leash.
 _LOCATION_LAST_TIMEOUT = 8.0
 #: Anything older than this is reported as stale rather than passed off as now.
 _LOCATION_FRESH_SECONDS = 120.0
+#: Beyond this radius the answer is a neighbourhood, not a position, and the
+#: reply has to say so. A cell-tower-only fix is routinely 600 m to several km;
+#: Wi-Fi assisted is 15-150 m; GPS outdoors is 5-20 m.
+_LOCATION_COARSE_METRES = 300.0
+
+#: precision -> (accuracy good enough to stop waiting, total seconds to wait).
+#: "balanced" is the default: take a quick network fix if it is genuinely
+#: precise, otherwise keep waiting for GPS rather than reporting a 2 km circle.
+_LOCATION_PRECISION = {
+    "fast": (1000.0, 15.0),
+    "balanced": (100.0, 40.0),
+    "precise": (25.0, 70.0),
+}
 
 _LOCATION_HELP = (
     "No location fix. Check that the Termux:API app is installed, that it has "
@@ -222,6 +238,10 @@ def _location_payload(data: Mapping[str, Any], provider: str, request: str) -> d
         if isinstance(data.get(key), (int, float))
     }
     payload["provider"] = str(data.get("provider") or provider)
+    accuracy = payload.get("accuracy")
+    payload["approximate"] = (
+        not isinstance(accuracy, (int, float)) or accuracy > _LOCATION_COARSE_METRES
+    )
     elapsed_ms = data.get("elapsedMs")
     if isinstance(elapsed_ms, (int, float)):
         age = float(elapsed_ms) / 1000.0
@@ -232,43 +252,99 @@ def _location_payload(data: Mapping[str, Any], provider: str, request: str) -> d
     return payload
 
 
+def _location_accuracy(payload: Mapping[str, Any]) -> float:
+    """Sort key: a fix with no stated accuracy is treated as the worst."""
+    accuracy = payload.get("accuracy")
+    return float(accuracy) if isinstance(accuracy, (int, float)) else float("inf")
+
+
 def _location_summary(payload: Mapping[str, Any]) -> str:
     parts = [f"Location: {payload['latitude']:.5f}, {payload['longitude']:.5f}"]
     accuracy = payload.get("accuracy")
     if isinstance(accuracy, (int, float)):
-        parts.append(f"accurate to about {round(accuracy)} m")
+        if accuracy >= 1000:
+            parts.append(f"accurate only to about {accuracy / 1000:.1f} km")
+        else:
+            parts.append(f"accurate to about {round(accuracy)} m")
     parts.append(f"via {payload['provider']}")
     if payload.get("stale"):
         age = payload.get("fix_age_seconds")
         when = f"{round(age / 60)} min old" if isinstance(age, (int, float)) else "cached"
         parts.append(f"last known fix, {when}")
-    return " - ".join(parts) + "."
+    summary = " - ".join(parts) + "."
+    if payload.get("approximate"):
+        summary += (
+            " This is a coarse cell-tower or Wi-Fi estimate and can be off by a"
+            " long way; ask again with precision 'precise' to wait for GPS."
+        )
+    return summary
+
+
+def _location_race(providers: tuple[str, ...], target_accuracy: float, deadline: float):
+    """Ask several providers at once and keep the most accurate answer.
+
+    Sequential fallback picks whoever replies first, which is always the
+    network provider - and a cell-tower network fix can be kilometres out.
+    Running them together costs no extra wall time and lets GPS win on
+    accuracy when it does arrive.
+    """
+    best: dict[str, Any] | None = None
+    failures: list[str] = []
+    finish_by = time.monotonic() + deadline
+
+    with ThreadPoolExecutor(max_workers=len(providers), thread_name_prefix="loc") as pool:
+        futures = {
+            pool.submit(
+                _location_read, provider, "once", _LOCATION_ONCE_TIMEOUTS.get(provider, 25.0)
+            ): provider
+            for provider in providers
+        }
+        try:
+            for future in as_completed(futures, timeout=max(0.1, deadline)):
+                provider = futures[future]
+                data, reason = future.result()
+                if data is None:
+                    failures.append(f"{provider}: {reason}")
+                    continue
+                candidate = _location_payload(data, provider, "once")
+                if best is None or _location_accuracy(candidate) < _location_accuracy(best):
+                    best = candidate
+                # Good enough, or out of time: stop waiting for the stragglers.
+                if _location_accuracy(best) <= target_accuracy or time.monotonic() >= finish_by:
+                    break
+        except FuturesTimeout:
+            failures.append(f"timed out after {deadline:.0f}s waiting for a fix")
+        finally:
+            # Do not block the tool on a GPS read that may never return.
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    return best, failures
 
 
 def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
-    """Get a position, preferring a fresh fix but never hanging forever.
+    """Get a position, preferring accuracy over whoever answers first.
 
-    Order of attempts: the requested provider fresh, then the other real
-    provider fresh, then any cached fix. A stale answer clearly labelled as
-    stale is far more useful than a timeout, which is what the previous
-    single 25-second `-r once` call produced on every cold start.
+    An explicit provider is honoured as-is. Otherwise GPS and network are
+    raced: the network answer arrives in seconds and is kept as a floor, and
+    GPS is allowed to replace it if a better fix lands inside the budget.
+    Failing everything, a cached fix is returned clearly labelled as stale.
     """
     del context
-    requested = str(arguments.get("provider") or "network")
-    order = [requested] + [p for p in ("network", "gps") if p != requested]
+    precision = str(arguments.get("precision") or "balanced")
+    target_accuracy, deadline = _LOCATION_PRECISION.get(
+        precision, _LOCATION_PRECISION["balanced"]
+    )
+    requested = arguments.get("provider")
+    providers = (str(requested),) if requested else ("network", "gps")
 
-    failures: list[str] = []
-    for provider in order:
-        data, reason = _location_read(
-            provider, "once", _LOCATION_ONCE_TIMEOUTS.get(provider, 20.0)
-        )
-        if data is not None:
-            payload = _location_payload(data, provider, "once")
-            return ToolResult.ok(_location_summary(payload), payload)
-        failures.append(f"{provider}: {reason}")
+    best, failures = _location_race(providers, target_accuracy, deadline)
+    if best is not None:
+        return ToolResult.ok(_location_summary(best), best)
 
     # Nothing fresh. A cached fix still answers "roughly where is my phone".
-    for provider in ("network", "gps", "passive"):
+    for provider in ("gps", "network", "passive"):
         data, reason = _location_read(provider, "last", _LOCATION_LAST_TIMEOUT)
         if data is not None:
             payload = _location_payload(data, provider, "last")
@@ -430,7 +506,7 @@ def extra_termux_tools() -> list[ToolSpec]:
         return {"type": "object", "properties": {name: {"type": "string", "minLength": 1, "maxLength": maximum}}, "required": [name], "additionalProperties": False}
     return [
         ToolSpec("capture_photo", "Capture one photo with the Android camera and send it to Telegram. Use only when the owner explicitly asks to take a photo, selfie, or camera snapshot. Camera content is sensitive.", {"type": "object", "properties": {"camera": {"type": "string", "enum": ["front", "back"]}}, "required": ["camera"], "additionalProperties": False}, Risk.SENSITIVE_READ, _camera, timeout_seconds=30),
-        ToolSpec("get_location", "Get the Android device's current coordinates. Use only when the owner explicitly asks where the device is or requests its location. Prefer the default 'network' provider: it answers in seconds, while 'gps' is more precise but can take a minute outdoors and usually fails indoors. May take up to a minute; if no fresh fix is available it returns the last known position, flagged as stale. This returns sensitive location data.", {"type": "object", "properties": {"provider": {"type": "string", "enum": ["network", "gps", "passive"], "description": "Location source. 'network' (default) is fast and works indoors; 'gps' is precise but slow."}}, "additionalProperties": False}, Risk.SENSITIVE_READ, _location, timeout_seconds=90, idempotent=True),
+        ToolSpec("get_location", "Get the Android device's current coordinates. Use only when the owner explicitly asks where the device is or requests its location. By default this races the network and GPS sources and returns the most accurate fix, which can take a minute; indoors GPS often never fixes and the answer falls back to a Wi-Fi or cell-tower estimate that may be off by kilometres. Always tell the owner the reported accuracy. If no fresh fix is available it returns the last known position, flagged as stale. This returns sensitive location data.", {"type": "object", "properties": {"precision": {"type": "string", "enum": ["fast", "balanced", "precise"], "description": "How long to wait for an accurate fix. 'fast' returns the first answer, which may be a cell-tower estimate kilometres wide. 'balanced' (default) waits up to about 40s for a fix good to ~100m. 'precise' waits up to about 70s for GPS. Use 'precise' when the owner says the location was wrong or needs their exact position."}, "provider": {"type": "string", "enum": ["network", "gps", "passive"], "description": "Force one source. Leave unset to race network and GPS and keep the most accurate result."}}, "additionalProperties": False}, Risk.SENSITIVE_READ, _location, timeout_seconds=100, idempotent=True),
         ToolSpec("get_system_info", "Read a snapshot of device memory, shared-storage usage, and uptime. Use for system health, RAM, storage, or uptime questions. This does not change the device.", no_args, Risk.READ_ONLY, _sysinfo, idempotent=True),
         ToolSpec("get_network_info", "Read local IPv4 interfaces and a concise current Wi-Fi network snapshot. Use when the owner asks about device IP addresses, network state, or connectivity. This does not contact a public IP service.", no_args, Risk.SENSITIVE_READ, _network_info, idempotent=True),
         ToolSpec("get_wifi_info", "Read details about the current Wi-Fi connection, including SSID, IP address, link speed, and signal strength. Use for questions about the active Wi-Fi network. This does not scan other networks.", no_args, Risk.SENSITIVE_READ, _json_command(["termux-wifi-connectioninfo"], "Wi-Fi information retrieved."), idempotent=True),

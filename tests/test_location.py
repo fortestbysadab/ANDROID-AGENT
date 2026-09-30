@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from typing import ClassVar
 from unittest import mock
 
 from android_agent.tools import termux_extra
@@ -136,6 +137,98 @@ class LocationFallbackTests(unittest.TestCase):
             result = run()
         self.assertAlmostEqual(result.data["latitude"], 22.5726)
         self.assertNotIn("last", [c[1] for c in fake.calls])
+
+
+class LocationAccuracyTests(unittest.TestCase):
+    """The reported position must be the most accurate one available.
+
+    A cell-tower network fix is routinely 600 m to several km wide. Returning
+    whichever provider answered first meant that estimate won every time,
+    because GPS is always slower.
+    """
+
+    COARSE: ClassVar[dict] = dict(FIX, accuracy=2100.0, provider="network")
+    FINE: ClassVar[dict] = dict(FIX, accuracy=12.0, provider="gps")
+
+    def test_gps_beats_a_kilometre_wide_network_fix(self):
+        with patched({
+            ("network", "once"): (True, json.dumps(self.COARSE)),
+            ("gps", "once"): (True, json.dumps(self.FINE)),
+        }):
+            result = run()
+        self.assertEqual(result.data["provider"], "gps")
+        self.assertEqual(result.data["accuracy"], 12.0)
+        self.assertFalse(result.data["approximate"])
+
+    def test_both_providers_are_asked_at_once(self):
+        with patched({
+            ("network", "once"): (True, json.dumps(self.COARSE)),
+            ("gps", "once"): (True, json.dumps(self.FINE)),
+        }) as fake:
+            run()
+        self.assertEqual({c[0] for c in fake.calls}, {"network", "gps"})
+
+    def test_a_coarse_fix_is_still_returned_when_it_is_all_there_is(self):
+        with patched({
+            ("network", "once"): (True, json.dumps(self.COARSE)),
+            ("gps", "once"): (True, ""),
+        }):
+            result = run()
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.data["approximate"])
+
+    def test_a_coarse_fix_says_so_in_kilometres(self):
+        with patched({
+            ("network", "once"): (True, json.dumps(self.COARSE)),
+            ("gps", "once"): (True, ""),
+        }):
+            summary = run().summary
+        self.assertIn("2.1 km", summary)
+        self.assertIn("coarse", summary.lower())
+        self.assertIn("precise", summary)
+
+    def test_a_precise_fix_carries_no_warning(self):
+        with patched({("gps", "once"): (True, json.dumps(self.FINE))}):
+            summary = run({"provider": "gps"}).summary
+        self.assertNotIn("coarse", summary.lower())
+        self.assertIn("12 m", summary)
+
+    def test_fix_without_stated_accuracy_counts_as_approximate(self):
+        blind = {k: v for k, v in FIX.items() if k != "accuracy"}
+        with patched({
+            ("network", "once"): (True, json.dumps(blind)),
+            ("gps", "once"): (True, ""),
+        }):
+            result = run()
+        self.assertTrue(result.data["approximate"])
+
+    def test_an_explicit_provider_is_not_second_guessed(self):
+        with patched({
+            ("network", "once"): (True, json.dumps(self.COARSE)),
+            ("gps", "once"): (True, json.dumps(self.FINE)),
+        }) as fake:
+            result = run({"provider": "network"})
+        self.assertEqual({c[0] for c in fake.calls}, {"network"})
+        self.assertEqual(result.data["provider"], "network")
+
+    def test_precision_levels_set_different_budgets(self):
+        fast = termux_extra._LOCATION_PRECISION["fast"]
+        balanced = termux_extra._LOCATION_PRECISION["balanced"]
+        precise = termux_extra._LOCATION_PRECISION["precise"]
+        self.assertLess(fast[1], balanced[1])
+        self.assertLess(balanced[1], precise[1])
+        # Tighter accuracy target the longer we are willing to wait.
+        self.assertGreater(fast[0], balanced[0])
+        self.assertGreater(balanced[0], precise[0])
+
+    def test_the_slowest_precision_still_fits_the_tool_timeout(self):
+        slowest = max(deadline for _, deadline in termux_extra._LOCATION_PRECISION.values())
+        self.assertGreater(spec().timeout_seconds, slowest)
+
+    def test_unknown_precision_falls_back_to_balanced(self):
+        with patched({("network", "once"): (True, json.dumps(self.FINE))}):
+            result = run({"precision": "nonsense"})
+        self.assertEqual(result.status, "ok")
 
 
 class LocationFailureTests(unittest.TestCase):

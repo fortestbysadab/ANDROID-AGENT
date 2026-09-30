@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 from android_agent.agent.runtime import RunStatus
 from android_agent.agent.session import SqliteSessionStore
 from android_agent.tools.media import MEDIA_KINDS, media_root, storage_advice
+from android_agent.web.archive import ChatArchive, new_conversation_id
 from android_agent.web.security import AuthManager
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class WebApp:
         runtime,
         approvals,
         sessions: SqliteSessionStore,
+        archive: ChatArchive,
         auth: AuthManager,
         owner_id: int,
         session_ttl_seconds: float,
@@ -59,6 +61,7 @@ class WebApp:
         self.runtime = runtime
         self.approvals = approvals
         self.sessions = sessions
+        self.archive = archive
         self.auth = auth
         self.owner_id = owner_id
         self.session_ttl_seconds = session_ttl_seconds
@@ -66,19 +69,71 @@ class WebApp:
         # front ends do not interleave into a single history.
         self.session_key = session_key if session_key is not None else -abs(owner_id)
         self.run_lock = threading.Lock()
-        self.transcript: list[dict[str, Any]] = []
         self.transcript_lock = threading.Lock()
+        # Resume the most recent archived chat so a restart (Termux kills
+        # background processes freely) does not present a blank screen.
+        recent = self.archive.recent(limit=1)
+        self.conversation_id = recent[0].conversation_id if recent else new_conversation_id()
+        self.transcript: list[dict[str, Any]] = (
+            self.archive.transcript(self.conversation_id) or [] if recent else []
+        )
 
     def add_message(self, role: str, text: str, **extra: Any) -> dict[str, Any]:
         entry = {"role": role, "text": text, "at": time.time(), **extra}
         with self.transcript_lock:
             self.transcript.append(entry)
             del self.transcript[:-200]
+            snapshot = list(self.transcript)
+        self.archive.save(self.conversation_id, snapshot)
         return entry
 
-    def clear_transcript(self) -> None:
+    def persist(self) -> None:
+        """Write the current transcript back to the archive."""
+        with self.transcript_lock:
+            snapshot = list(self.transcript)
+        self.archive.save(self.conversation_id, snapshot)
+
+    def start_new_conversation(self) -> None:
+        """Archive whatever is on screen and begin an empty chat."""
+        self.persist()
+        self.sessions.reset(self.session_key)
         with self.transcript_lock:
             self.transcript.clear()
+            self.conversation_id = new_conversation_id()
+
+    def open_conversation(self, conversation_id: str) -> bool:
+        """Restore an archived transcript for viewing.
+
+        The model's context is deliberately not restored: it expired, and
+        pretending otherwise would make the assistant look like it forgot
+        things it can see on screen. The UI surfaces this as a notice.
+        """
+        restored = self.archive.transcript(conversation_id)
+        if restored is None:
+            return False
+        self.persist()
+        self.sessions.reset(self.session_key)
+        with self.transcript_lock:
+            self.conversation_id = conversation_id
+            self.transcript[:] = restored
+        return True
+
+    def forget_conversation(self, conversation_id: str) -> bool:
+        deleted = self.archive.delete(conversation_id)
+        if conversation_id == self.conversation_id:
+            self.sessions.reset(self.session_key)
+            with self.transcript_lock:
+                self.transcript.clear()
+                self.conversation_id = new_conversation_id()
+        return deleted
+
+    def forget_all(self) -> int:
+        removed = self.archive.clear()
+        self.sessions.reset(self.session_key)
+        with self.transcript_lock:
+            self.transcript.clear()
+            self.conversation_id = new_conversation_id()
+        return removed
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -184,6 +239,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, self._state())
             return
 
+        if path == "/api/conversations":
+            if not self._require_api_auth():
+                return
+            self._json(HTTPStatus.OK, {"items": self._conversations()})
+            return
+
         if path == "/api/media":
             if not self._require_api_auth():
                 return
@@ -225,9 +286,21 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/approval":
             self._approval()
         elif path == "/api/new":
-            self.app.sessions.reset(self.app.session_key)
-            self.app.clear_transcript()
+            self.app.start_new_conversation()
             self._json(HTTPStatus.OK, {"ok": True, "state": self._state()})
+        elif path == "/api/conversations/open":
+            wanted = str(self._body().get("id", ""))
+            if not self.app.open_conversation(wanted):
+                self._json(HTTPStatus.NOT_FOUND, {"error": "That chat is gone."})
+                return
+            self._json(HTTPStatus.OK, {"ok": True, "state": self._state()})
+        elif path == "/api/conversations/delete":
+            self.app.forget_conversation(str(self._body().get("id", "")))
+            self._json(HTTPStatus.OK, {"ok": True, "state": self._state()})
+        elif path == "/api/conversations/clear":
+            removed = self.app.forget_all()
+            logger.info("Owner cleared %d archived web conversations", removed)
+            self._json(HTTPStatus.OK, {"ok": True, "removed": removed, "state": self._state()})
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint."})
 
@@ -383,12 +456,22 @@ class Handler(BaseHTTPRequestHandler):
                 )
         return artifacts
 
+    def _conversations(self) -> list[dict[str, Any]]:
+        return [
+            {**summary.as_dict(), "current": summary.conversation_id == self.app.conversation_id}
+            for summary in self.app.archive.recent()
+        ]
+
     def _state(self) -> dict[str, Any]:
         session = self.app.sessions.active(self.app.session_key)
         with self.app.transcript_lock:
             transcript = list(self.app.transcript)
         return {
             "messages": transcript,
+            "conversation_id": self.app.conversation_id,
+            "conversations": self._conversations(),
+            # True when the screen shows history the model can no longer see.
+            "context_lost": bool(transcript) and session is None,
             "session": {
                 "active": session is not None,
                 "id": session.session_id if session else None,

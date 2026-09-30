@@ -25,8 +25,9 @@ from android_agent.observability.audit import MemoryAuditSink
 from android_agent.policy.engine import DefaultPolicy
 from android_agent.tools.base import Risk, ToolResult, ToolSpec
 from android_agent.tools.registry import ToolRegistry
+from android_agent.web.archive import ChatArchive
 from android_agent.web.security import AuthManager, WebConfigError, validate_token
-from android_agent.web.server import COOKIE_NAME, CSRF_HEADER, WebApp, make_server
+from android_agent.web.server import COOKIE_NAME, CSRF_HEADER, UI_PATH, WebApp, make_server
 
 OWNER = 4242
 TOKEN = "s" * 24
@@ -129,10 +130,13 @@ class WebTestCase(unittest.TestCase):
         )
         self.sessions = SqliteSessionStore(str(Path(self.tmp.name) / "s.db"))
         self.addCleanup(self.sessions.close)
+        self.archive = ChatArchive(str(Path(self.tmp.name) / "chats.db"), max_conversations=3)
+        self.addCleanup(self.archive.close)
         self.app = WebApp(
             runtime=runtime,
             approvals=InMemoryApprovalStore(ttl_seconds=300),
             sessions=self.sessions,
+            archive=self.archive,
             auth=AuthManager(TOKEN),
             owner_id=OWNER,
             session_ttl_seconds=900,
@@ -307,6 +311,149 @@ class MessageTests(WebTestCase):
         self.assertEqual(status, 404)
 
 
+class ConversationTests(WebTestCase):
+    """Recent chats: archived transcripts, reopening, and deletion."""
+
+    planner_responses = (PlannerResponse(text="Done."),)
+
+    def setUp(self):
+        super().setUp()
+        self.client.login()
+
+    def _titles(self, state):
+        return [c["title"] for c in state["conversations"]]
+
+    def test_a_chat_is_archived_as_soon_as_it_starts(self):
+        _, payload = self.client.request("POST", "/api/message", {"text": "first thing"})
+        self.assertEqual(self._titles(payload["state"]), ["first thing"])
+        self.assertTrue(payload["state"]["conversations"][0]["current"])
+
+    def test_new_chat_archives_the_previous_one(self):
+        self.client.request("POST", "/api/message", {"text": "older chat"})
+        _, payload = self.client.request("POST", "/api/new")
+        self.assertEqual(payload["state"]["messages"], [])
+        self.assertEqual(self._titles(payload["state"]), ["older chat"])
+        self.assertFalse(payload["state"]["conversations"][0]["current"])
+
+    def test_empty_chats_never_appear_in_the_list(self):
+        self.client.request("POST", "/api/new")
+        self.client.request("POST", "/api/new")
+        _, payload = self.client.request("GET", "/api/state")
+        self.assertEqual(payload["conversations"], [])
+
+    def test_reopening_restores_the_transcript(self):
+        self.client.request("POST", "/api/message", {"text": "remember this"})
+        _, after_new = self.client.request("POST", "/api/new")
+        old_id = after_new["state"]["conversations"][0]["id"]
+        status, payload = self.client.request("POST", "/api/conversations/open", {"id": old_id})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["state"]["messages"][0]["text"], "remember this")
+        self.assertEqual(payload["state"]["conversation_id"], old_id)
+
+    def test_reopening_does_not_restore_model_context(self):
+        """The transcript is a record; the model's memory still expired."""
+        self.client.request("POST", "/api/message", {"text": "secret contact lookup"})
+        _, after_new = self.client.request("POST", "/api/new")
+        old_id = after_new["state"]["conversations"][0]["id"]
+        _, payload = self.client.request("POST", "/api/conversations/open", {"id": old_id})
+        self.assertTrue(payload["state"]["context_lost"])
+        self.assertIsNone(self.sessions.active(self.app.session_key))
+
+        self.planner.requests.clear()
+        self.client.request("POST", "/api/message", {"text": "what did I just ask?"})
+        self.assertNotIn("secret contact lookup", json.dumps(self.planner.requests[0]))
+
+    def test_switching_away_from_a_live_chat_drops_its_context(self):
+        """Opening chat B must not leave chat A's tool output in the prompt."""
+        self.client.request("POST", "/api/message", {"text": "chat A private data"})
+        self.client.request("POST", "/api/new")
+        _, second = self.client.request("POST", "/api/message", {"text": "chat B"})
+        # Chat B is live and remembered at this point.
+        self.assertTrue(second["state"]["session"]["active"])
+        older = next(c["id"] for c in second["state"]["conversations"] if not c["current"])
+
+        _, opened = self.client.request("POST", "/api/conversations/open", {"id": older})
+        self.assertTrue(opened["state"]["context_lost"])
+        self.assertIsNone(self.sessions.active(self.app.session_key))
+
+        self.planner.requests.clear()
+        self.client.request("POST", "/api/message", {"text": "continue"})
+        replayed = json.dumps(self.planner.requests[0])
+        self.assertNotIn("chat A private data", replayed)
+        self.assertNotIn("chat B", replayed)
+
+    def test_context_lost_is_false_for_a_live_conversation(self):
+        _, payload = self.client.request("POST", "/api/message", {"text": "live one"})
+        self.assertFalse(payload["state"]["context_lost"])
+
+    def test_opening_a_missing_chat_returns_404(self):
+        status, _ = self.client.request("POST", "/api/conversations/open", {"id": "ghost"})
+        self.assertEqual(status, 404)
+
+    def test_deleting_the_current_chat_clears_the_screen(self):
+        _, payload = self.client.request("POST", "/api/message", {"text": "delete me"})
+        current = payload["state"]["conversation_id"]
+        _, after = self.client.request("POST", "/api/conversations/delete", {"id": current})
+        self.assertEqual(after["state"]["messages"], [])
+        self.assertEqual(after["state"]["conversations"], [])
+        self.assertNotEqual(after["state"]["conversation_id"], current)
+
+    def test_deleting_another_chat_leaves_the_current_one_alone(self):
+        self.client.request("POST", "/api/message", {"text": "old chat"})
+        _, after_new = self.client.request("POST", "/api/new")
+        old_id = after_new["state"]["conversations"][0]["id"]
+        self.client.request("POST", "/api/message", {"text": "current chat"})
+        _, after = self.client.request("POST", "/api/conversations/delete", {"id": old_id})
+        self.assertEqual(self._titles(after["state"]), ["current chat"])
+        self.assertEqual(after["state"]["messages"][0]["text"], "current chat")
+
+    def test_clear_all_wipes_the_archive_and_the_session(self):
+        self.client.request("POST", "/api/message", {"text": "one"})
+        self.client.request("POST", "/api/new")
+        self.client.request("POST", "/api/message", {"text": "two"})
+        status, payload = self.client.request("POST", "/api/conversations/clear")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["removed"], 2)
+        self.assertEqual(payload["state"]["conversations"], [])
+        self.assertEqual(payload["state"]["messages"], [])
+        self.assertIsNone(self.sessions.active(self.app.session_key))
+
+    def test_archive_is_capped_and_old_chats_are_really_deleted(self):
+        ids = []
+        for index in range(5):
+            _, payload = self.client.request("POST", "/api/message", {"text": f"chat {index}"})
+            ids.append(payload["state"]["conversation_id"])
+            self.client.request("POST", "/api/new")
+        _, state = self.client.request("GET", "/api/state")
+        self.assertEqual(self._titles(state), ["chat 4", "chat 3", "chat 2"])
+        # Not merely hidden from the list: the rows are gone from disk.
+        self.assertIsNone(self.archive.transcript(ids[0]))
+        self.assertIsNone(self.archive.transcript(ids[1]))
+        self.assertIsNotNone(self.archive.transcript(ids[2]))
+
+    def test_conversation_endpoints_require_authentication(self):
+        self.client.request("POST", "/api/logout")
+        for path in ("/api/conversations/open", "/api/conversations/delete",
+                     "/api/conversations/clear"):
+            with self.subTest(path=path):
+                status, _ = self.client.request("POST", path, {"id": "x"})
+                self.assertEqual(status, 401)
+
+    def test_transcript_survives_a_restart(self):
+        self.client.request("POST", "/api/message", {"text": "persisted line"})
+        rebuilt = WebApp(
+            runtime=self.app.runtime,
+            approvals=self.app.approvals,
+            sessions=self.sessions,
+            archive=self.archive,
+            auth=AuthManager(TOKEN),
+            owner_id=OWNER,
+            session_ttl_seconds=900,
+        )
+        self.assertEqual(rebuilt.transcript[0]["text"], "persisted line")
+        self.assertEqual(rebuilt.conversation_id, self.app.conversation_id)
+
+
 class ApprovalTests(WebTestCase):
     """Dangerous tools must not execute on the web path without a click."""
 
@@ -403,6 +550,20 @@ class StaticTests(WebTestCase):
         self.client.login()
         _, payload = self.client.request("GET", "/api/ping", csrf=False)
         self.assertTrue(payload["authenticated"])
+
+    def test_ui_is_self_contained(self):
+        """No CDN, no webfont, no tracker: the phone may be offline."""
+        html = UI_PATH.read_text(encoding="utf-8")
+        for pattern in ("src=\"http", "href=\"http://", "cdn.", "googleapis", "unpkg"):
+            with self.subTest(pattern=pattern):
+                self.assertNotIn(pattern, html)
+
+    def test_ui_ships_both_themes(self):
+        html = UI_PATH.read_text(encoding="utf-8")
+        self.assertIn("prefers-color-scheme: dark", html)
+        self.assertIn('data-theme="dark"', html)
+        self.assertIn("prefers-reduced-motion", html)
+        self.assertIn("color-scheme: light dark", html)
 
     def test_unknown_get_path_returns_404(self):
         status, _ = self.client.request("GET", "/secret", csrf=False)

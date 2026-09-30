@@ -26,6 +26,7 @@ from android_agent.policy.engine import DefaultPolicy
 from android_agent.skills.loader import SkillRouter
 from android_agent.tools.catalog import build_full_registry
 from android_agent.tools.media import media_root, storage_advice
+from android_agent.web.archive import ChatArchive
 from android_agent.web.security import AuthManager, WebConfigError, validate_token
 from android_agent.web.server import WebApp, make_server
 
@@ -92,6 +93,7 @@ def main() -> int:
             ttl_seconds=settings.session_ttl_seconds,
             max_messages=settings.session_max_messages,
         ),
+        archive=ChatArchive(os.path.join(state_dir, "web_chats.db")),
         auth=AuthManager(token),
         owner_id=settings.owner_chat_id,
         session_ttl_seconds=settings.session_ttl_seconds,
@@ -119,6 +121,7 @@ def main() -> int:
     finally:
         server.shutdown()
         app.sessions.close()
+        app.archive.close()
     return 0
 
 

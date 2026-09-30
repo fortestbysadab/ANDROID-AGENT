@@ -134,6 +134,26 @@ cloudflared tunnel --url http://localhost:8765
 Anyone holding the tunnel URL **and** the token can control the phone. Rotate
 the token by editing `.env` and restarting.
 
+### Recent chats and themes
+
+The sidebar lists recent conversations so you can reopen one after closing the
+tab or restarting Termux. Two deliberate limits:
+
+- **Bounded retention.** Only the last 30 conversations are kept
+  (`web_chats.db` in the state directory). Older ones are deleted, not hidden.
+  Each chat has a delete button and there is a *Clear all*.
+- **Reopening restores the view, not the memory.** The model's context still
+  expires on the session TTL, because tool output like contacts, SMS and
+  location should not sit in a prompt indefinitely. When you open an older
+  chat the UI says plainly that the assistant no longer remembers it, instead
+  of letting you discover that by being misunderstood.
+
+The theme follows your OS by default and can be pinned to light or dark from
+the sidebar; the choice is stored in `localStorage`. Both palettes are authored
+separately and hold a 4.5:1 contrast ratio on body text rather than being an
+automatic inversion. The page is fully self-contained — no CDN, no webfont, no
+network call beyond this server — so it still renders on an offline phone.
+
 ### Running both front ends
 
 `agent_bot.py` and `python -m android_agent.web` are separate processes and can

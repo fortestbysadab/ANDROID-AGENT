@@ -13,6 +13,7 @@ from typing import Any
 
 from .base import Risk, ToolContext, ToolResult, ToolSpec
 from .files import _resolve_read_path
+from .ip_location import ip_location, ip_location_summary
 from .media import PHOTO, RECORDING, new_media_path
 from .termux import _run
 
@@ -389,6 +390,15 @@ def _location(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
                 summary += " No live fix was possible: " + _LOCATION_OFF_HELP
             return ToolResult.ok(summary, payload)
         failures.append(f"{provider} cached: {reason}")
+
+    # Everything on the device has failed. An IP estimate is a poor answer but
+    # it is better than none, provided it never pretends to be a device fix.
+    estimate = ip_location()
+    if estimate is not None:
+        summary = ip_location_summary(estimate)
+        if _location_disabled(failures):
+            summary += " " + _LOCATION_OFF_HELP
+        return ToolResult.ok(summary, estimate)
 
     help_text = _LOCATION_OFF_HELP if _location_disabled(failures) else _LOCATION_HELP
     return ToolResult.error(

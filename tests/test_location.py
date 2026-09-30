@@ -50,8 +50,33 @@ class FakeTermux:
         return reply(self) if callable(reply) else reply
 
 
-def patched(responses):
-    return mock.patch.object(termux_extra, "_run", FakeTermux(responses))
+class _Patched:
+    """Patch the Termux shell-out and, by default, disable the IP fallback.
+
+    Tests must never reach the network: the IP estimate is a separate concern
+    with its own tests below.
+    """
+
+    def __init__(self, responses, ip=None):
+        self.fake = FakeTermux(responses)
+        self.patchers = [
+            mock.patch.object(termux_extra, "_run", self.fake),
+            mock.patch.object(termux_extra, "ip_location", lambda: ip),
+        ]
+
+    def __enter__(self):
+        for patcher in self.patchers:
+            patcher.start()
+        return self.fake
+
+    def __exit__(self, *exc):
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+        return False
+
+
+def patched(responses, ip=None):
+    return _Patched(responses, ip)
 
 
 class LocationSuccessTests(unittest.TestCase):

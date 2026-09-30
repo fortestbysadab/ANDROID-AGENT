@@ -301,8 +301,9 @@ def _planner_failure_text(exc: Exception) -> str:
 def _assistant_message(response: PlannerResponse) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": response.text}
     if response.tool_calls:
-        message["tool_calls"] = [
-            {
+        serialized = []
+        for call in response.tool_calls:
+            entry: dict[str, Any] = {
                 "id": call.id,
                 "type": "function",
                 "function": {
@@ -310,8 +311,12 @@ def _assistant_message(response: PlannerResponse) -> dict[str, Any]:
                     "arguments": json.dumps(call.arguments, separators=(",", ":"), sort_keys=True),
                 },
             }
-            for call in response.tool_calls
-        ]
+            # Replay opaque provider metadata verbatim. Gemini 3 requires its
+            # thought_signature back or the next turn fails with HTTP 400.
+            if call.extra_content:
+                entry["extra_content"] = dict(call.extra_content)
+            serialized.append(entry)
+        message["tool_calls"] = serialized
     return message
 
 

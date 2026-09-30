@@ -133,6 +133,44 @@ def check_tool_calling(settings: Settings) -> bool:
     return _line(STATUS_OK, f"Tool-calling round trip selected: {picked}")
 
 
+def check_multi_turn(settings: Settings) -> bool:
+    """Drive a full tool loop: propose -> execute -> feed result back.
+
+    Gemini 3 thinking models reject the second turn unless the tool call's
+    thought_signature is replayed, so a single-turn check is not enough.
+    """
+    from android_agent.agent.runtime import AgentRuntime, RunStatus
+    from android_agent.models.openai_compatible import OpenAICompatiblePlanner
+    from android_agent.policy.engine import DefaultPolicy
+    from android_agent.tools.catalog import build_full_registry
+
+    runtime = AgentRuntime(
+        planner=OpenAICompatiblePlanner(
+            base_url=settings.llm_base_url,
+            model=settings.llm_model,
+            api_key=settings.llm_api_key,
+            dialect=settings.llm_dialect,
+            timeout_seconds=settings.request_timeout_seconds,
+        ),
+        registry=build_full_registry(),
+        policy=DefaultPolicy(str(settings.owner_chat_id)),
+        system_prompt="You are a device assistant. Use tools for live device data.",
+    )
+    outcome = runtime.run(
+        "how much battery charge",
+        actor_id=str(settings.owner_chat_id),
+        chat_id=settings.owner_chat_id,
+    )
+    if outcome.status is RunStatus.FAILED:
+        return _line(STATUS_FAIL, "Multi-turn tool loop", outcome.error or outcome.text)
+    used = ", ".join(sorted({r.summary[:60] for r in outcome.tool_results})) or "none"
+    return _line(
+        STATUS_OK,
+        f"Multi-turn tool loop ({outcome.status.value})",
+        f"reply: {outcome.text[:200]}\ntool results: {used}",
+    )
+
+
 def check_termux() -> bool:
     if shutil.which("termux-battery-status") is None:
         return _line(
@@ -161,6 +199,7 @@ def main() -> int:
         check_models(settings),
         check_chat(settings),
         check_tool_calling(settings),
+        check_multi_turn(settings),
         check_termux(),
     ]
     print()

@@ -51,6 +51,15 @@ class PlannerSchemaError(PlannerError):
     remedy = "The provider rejected a tool schema; this is an agent bug, not a config issue."
 
 
+class PlannerSignatureError(PlannerError):
+    """Gemini 3 rejected a replayed turn missing its thought signature."""
+
+    remedy = (
+        "The model's thought signature was not replayed. Update the agent; "
+        "android_agent/models/compat.py handles this."
+    )
+
+
 class PlannerRateLimitError(PlannerError):
     remedy = "The provider is rate limiting. Wait, or switch to a higher quota tier."
 
@@ -76,6 +85,8 @@ def _classify(status: int, detail: str) -> PlannerError:
         return PlannerRateLimitError(f"HTTP {status}: rate limited. {detail[:400]}")
     if status == 404:
         return PlannerModelError(f"HTTP {status}: model or endpoint path not found. {detail[:400]}")
+    if status == 400 and "thought_signature" in lowered.replace(" ", "_"):
+        return PlannerSignatureError(f"HTTP {status}: {detail[:600]}")
     if status == 400 and (
         "additionalproperties" in lowered
         or "function_declarations" in lowered
@@ -240,11 +251,18 @@ class OpenAICompatiblePlanner:
                     ) from exc
             if not isinstance(arguments, dict):
                 raise PlannerProtocolError(f"tool {name} arguments must be a JSON object")
+            # Gemini 3 thinking models return an opaque `thought_signature`
+            # here that MUST be replayed on the next turn or the API rejects
+            # the follow-up with HTTP 400. Capture it verbatim.
+            extra_content = item.get("extra_content")
             calls.append(
                 ToolCall(
                     id=str(item.get("id") or uuid.uuid4().hex),
                     name=name,
                     arguments=arguments,
+                    extra_content=dict(extra_content)
+                    if isinstance(extra_content, Mapping)
+                    else {},
                 )
             )
 

@@ -61,6 +61,7 @@ Three things bite people here, and the agent now handles all three:
 1. **The base URL must end in `/v1beta/openai`**, not `/v1beta` or `/v1`. A wrong path returns an opaque 404. The loader repairs the common mistakes.
 2. **Gemini rejects strict JSON Schema.** Its `function_declarations` parser accepts only a restricted OpenAPI 3.0 subset and returns `400 Unknown name "additionalProperties"`. `android_agent/models/compat.py` strips unsupported keywords from the *outbound* schema only — local argument validation stays strict and closed.
 3. **The model name must be real.** `python -m android_agent.doctor` lists what the endpoint actually offers.
+4. **Gemini 3 thinking models require thought signatures.** Each tool call comes back with an opaque `thought_signature` under `tool_calls[].extra_content.google`, and the follow-up turn is rejected with `400 Function call is missing a thought_signature in functionCall parts` unless it is replayed verbatim. The planner captures it onto `ToolCall.extra_content` and the runtime replays it. Signatures are opaque transport data: they are never interpreted, never shown, and never affect a policy decision.
 
 ### Troubleshooting
 

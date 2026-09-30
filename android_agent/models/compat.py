@@ -138,28 +138,80 @@ def adapt_tools(
     return adapted
 
 
+#: Documented escape hatch. Gemini accepts this sentinel in place of a real
+#: signature for history it never signed (for example a tool call replayed
+#: after a restart, or one produced by a different model). Real signatures are
+#: always preferred; this only prevents a hard 400 on unsignable history.
+UNSIGNED_PLACEHOLDER = "skip_thought_signature_validator"
+
+
+def _gemini_tool_calls(tool_calls: Any, first_is_signed: bool) -> Any:
+    """Ensure the leading function call carries a thought signature.
+
+    Gemini 3 thinking models reject a replayed turn whose first `functionCall`
+    part has no `thought_signature`. Parallel calls only ever carry a
+    signature on the first call, so only that one needs repair.
+    """
+    if not isinstance(tool_calls, (list, tuple)) or first_is_signed:
+        return tool_calls
+    repaired = [dict(call) if isinstance(call, Mapping) else call for call in tool_calls]
+    head = repaired[0]
+    if isinstance(head, dict):
+        head["extra_content"] = {"google": {"thought_signature": UNSIGNED_PLACEHOLDER}}
+    return repaired
+
+
+def _first_call_is_signed(tool_calls: Any) -> bool:
+    if not isinstance(tool_calls, (list, tuple)) or not tool_calls:
+        return True
+    head = tool_calls[0]
+    if not isinstance(head, Mapping):
+        return True
+    signature = (
+        (head.get("extra_content") or {}).get("google", {}).get("thought_signature")
+        if isinstance(head.get("extra_content"), Mapping)
+        else None
+    )
+    return bool(signature)
+
+
 def adapt_messages(
     messages: Sequence[Mapping[str, Any]], dialect: Dialect
 ) -> list[dict[str, Any]]:
     """Normalize conversation messages for the target dialect.
 
     Gemini's compatibility layer rejects a null `content` on an assistant
-    message that carries `tool_calls`, and ignores the non-standard `name`
-    field on tool results.
+    message that carries `tool_calls`, ignores the non-standard `name` field on
+    tool results, and requires each replayed function call to carry back the
+    `thought_signature` it issued.
+
+    Providers other than Gemini have no use for `extra_content`, so it is
+    removed to avoid sending an unknown field to a strict endpoint.
     """
     normalized: list[dict[str, Any]] = []
     for message in messages:
         entry = dict(message)
+        role = entry.get("role")
+
         if dialect is Dialect.GEMINI:
-            if entry.get("role") == "assistant" and entry.get("content") is None:
+            if role == "assistant":
                 if entry.get("tool_calls"):
                     entry.pop("content", None)
-                else:
+                    entry["tool_calls"] = _gemini_tool_calls(
+                        entry["tool_calls"], _first_call_is_signed(entry["tool_calls"])
+                    )
+                elif entry.get("content") is None:
                     entry["content"] = ""
-            if entry.get("role") == "tool":
+            if role == "tool":
                 entry.pop("name", None)
-        elif entry.get("role") == "assistant" and entry.get("content") is None:
-            entry["content"] = None
+        else:
+            if role == "assistant" and isinstance(entry.get("tool_calls"), (list, tuple)):
+                entry["tool_calls"] = [
+                    {k: v for k, v in call.items() if k != "extra_content"}
+                    if isinstance(call, Mapping)
+                    else call
+                    for call in entry["tool_calls"]
+                ]
         normalized.append(entry)
     return normalized
 

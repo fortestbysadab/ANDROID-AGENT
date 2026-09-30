@@ -14,6 +14,11 @@ class ToolCall:
     id: str
     name: str
     arguments: Mapping[str, Any]
+    #: Opaque provider metadata that must be replayed verbatim on later turns.
+    #: Gemini 3 thinking models put a required `thought_signature` here. It is
+    #: never interpreted, never shown to the user, and never authorizes
+    #: anything; policy decisions ignore it entirely.
+    extra_content: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

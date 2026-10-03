@@ -31,6 +31,11 @@ JOB_SCHEDULER_FLOOR_SECONDS = 900
 MIN_INTERVAL_SECONDS = 60
 #: Keeps one runaway task from filling the phone's storage with history.
 DEFAULT_MAX_TASKS = 50
+#: How long a finished one-off task stays listed after it runs. Long enough
+#: that the owner can look back at what happened overnight, short enough that
+#: the schedule does not become a graveyard. A repeating task is never
+#: purged: it is still part of the schedule precisely because it repeats.
+COMPLETED_RETENTION_SECONDS = 24 * 3600
 
 ONCE = "once"
 INTERVAL = "interval"
@@ -90,6 +95,11 @@ class ScheduledTask:
     approved_hash: str | None = None
     condition: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def is_completed(self) -> bool:
+        """A one-off that has already run. Distinct from a paused task."""
+        return self.schedule_kind == ONCE and not self.enabled and self.run_count > 0
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "id": self.task_id,
@@ -102,6 +112,8 @@ class ScheduledTask:
             "next_run_at": self.next_run_at,
             "next_run_local": time.strftime("%Y-%m-%d %H:%M", time.localtime(self.next_run_at)),
             "enabled": self.enabled,
+            "completed": self.is_completed,
+            "last_run_at": self.last_run_at,
             "run_count": self.run_count,
             "last_status": self.last_status,
             "condition": dict(self.condition),
@@ -256,6 +268,22 @@ class ScheduleStore:
                 (moment, status, next_run, int(enabled), task_id),
             )
             self._connection.commit()
+
+    def purge_completed(self, *, now: float | None = None) -> int:
+        """Forget one-off tasks that finished more than a day ago.
+
+        Only one-offs: a repeating task that the owner paused is still
+        something they chose to keep, and deleting it would be data loss.
+        """
+        cutoff = (time.time() if now is None else now) - COMPLETED_RETENTION_SECONDS
+        with self._lock:
+            cursor = self._connection.execute(
+                "DELETE FROM tasks WHERE schedule_kind = ? AND enabled = 0 "
+                "AND run_count > 0 AND last_run_at IS NOT NULL AND last_run_at < ?",
+                (ONCE, cutoff),
+            )
+            self._connection.commit()
+        return cursor.rowcount
 
     def set_enabled(self, task_id: str, enabled: bool) -> bool:
         with self._lock:

@@ -197,6 +197,11 @@ never perform anything.
 Every run reports to you, including failures: silence is indistinguishable
 from "it never ran".
 
+A one-off task is history once it has run, not schedule. It stays listed as
+*done, 2h ago* for 24 hours so you can see what happened overnight, then it is
+deleted automatically. Repeating tasks are never purged - including ones you
+have paused, since pausing is a choice to keep them.
+
 While the agent is running, the scheduler checks every 30 seconds. Intervals
 below 15 minutes are accepted but only hold while the process is alive -
 Android's JobScheduler will not wake the phone more often than that. If the

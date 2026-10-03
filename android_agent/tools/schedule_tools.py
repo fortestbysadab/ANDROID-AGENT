@@ -92,8 +92,22 @@ TASK_ID_SCHEMA = {
 NO_ARGS = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
+def _ago(moment: float | None) -> str:
+    if not moment:
+        return "recently"
+    seconds = max(0.0, time.time() - moment)
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    return f"{int(seconds // 3600)}h ago"
+
+
 def _describe(task) -> str:
-    state = "" if task.enabled else " (paused)"
+    if task.is_completed:
+        state = f" - done {_ago(task.last_run_at)}"
+    elif not task.enabled:
+        state = " (paused)"
+    else:
+        state = ""
     return f"[{task.task_id}] {task.description} - {task.schedule_text()}{state}"
 
 
@@ -209,14 +223,26 @@ def schedule_tools(
 
     def listing(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
         del context, arguments
+        # Drop finished one-offs older than a day before showing the list, so
+        # the schedule reflects what is actually still going to happen even if
+        # no tick has run since.
+        store.purge_completed()
         tasks = store.all_tasks()
         if not tasks:
             return ToolResult.ok("There are no scheduled tasks.", {"tasks": []})
         lines = "\n".join(
-            f"{_describe(task)}, next {task.as_dict()['next_run_local']}" for task in tasks
+            _describe(task)
+            if task.is_completed
+            else f"{_describe(task)}, next {task.as_dict()['next_run_local']}"
+            for task in tasks
         )
+        upcoming = sum(1 for task in tasks if task.enabled)
+        done = sum(1 for task in tasks if task.is_completed)
+        headline = f"{upcoming} scheduled task(s)"
+        if done:
+            headline += f", plus {done} finished in the last 24 hours"
         return ToolResult.ok(
-            f"{len(tasks)} scheduled task(s):\n{lines}",
+            f"{headline}:\n{lines}",
             {"tasks": [task.as_dict() for task in tasks]},
         )
 

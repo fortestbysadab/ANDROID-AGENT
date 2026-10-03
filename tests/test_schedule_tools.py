@@ -243,6 +243,66 @@ class ListAndCancelTests(ScheduleToolsTestCase):
         self.assertTrue(tool.idempotent)
 
 
+class CompletedTaskVisibilityTests(ScheduleToolsTestCase):
+    """A one-off that has run is history, not schedule - but recent history."""
+
+    def _finished_one_off(self, *, ran_hours_ago=1.0):
+        self.call(
+            "schedule_task", description="Ping me", schedule="once",
+            in_minutes=1, tool_name="get_battery_status",
+        )
+        task = self.store.all_tasks()[0]
+        ran_at = time.time() - ran_hours_ago * 3600
+        self.store.record_run(task.task_id, "ok", now=ran_at)
+        return task.task_id
+
+    def test_a_finished_one_off_is_listed_as_done(self):
+        self._finished_one_off(ran_hours_ago=2)
+        result = self.call("list_scheduled_tasks")
+        self.assertIn("done", result.summary)
+        self.assertIn("2h ago", result.summary)
+        self.assertNotIn("paused", result.summary)
+
+    def test_the_headline_separates_upcoming_from_finished(self):
+        self._finished_one_off()
+        self.call(
+            "schedule_task", description="Daily battery", schedule="daily",
+            daily_time="07:00", tool_name="get_battery_status",
+        )
+        result = self.call("list_scheduled_tasks")
+        self.assertIn("1 scheduled task(s)", result.summary)
+        self.assertIn("1 finished in the last 24 hours", result.summary)
+
+    def test_a_finished_one_off_disappears_after_a_day(self):
+        task_id = self._finished_one_off(ran_hours_ago=25)
+        result = self.call("list_scheduled_tasks")
+        self.assertIn("no scheduled tasks", result.summary)
+        self.assertIsNone(self.store.get(task_id))
+
+    def test_listing_purges_without_needing_a_tick(self):
+        self._finished_one_off(ran_hours_ago=30)
+        self.assertEqual(len(self.store.all_tasks()), 1)
+        self.call("list_scheduled_tasks")
+        self.assertEqual(self.store.all_tasks(), [])
+
+    def test_a_recurring_task_is_never_described_as_done(self):
+        self.call(
+            "schedule_task", description="Daily battery", schedule="daily",
+            daily_time="07:00", tool_name="get_battery_status",
+        )
+        task = self.store.all_tasks()[0]
+        self.store.record_run(task.task_id, "ok")
+        result = self.call("list_scheduled_tasks")
+        self.assertNotIn("done", result.summary)
+        self.assertIn("every day at 07:00", result.summary)
+
+    def test_a_completed_task_shows_no_next_run(self):
+        """It is not going to happen again; offering a time would be a lie."""
+        self._finished_one_off()
+        result = self.call("list_scheduled_tasks")
+        self.assertNotIn("next ", result.summary)
+
+
 class CatalogueTests(unittest.TestCase):
     def test_scheduling_tools_are_absent_without_a_store(self):
         names = {s["function"]["name"] for s in build_full_registry().model_schemas()}

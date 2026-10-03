@@ -100,6 +100,7 @@ class ScheduleRunner:
 
     def tick(self, *, now: float | None = None) -> list[TaskRun]:
         """Run everything that is due. Never raises."""
+        self.store.purge_completed(now=now)
         runs: list[TaskRun] = []
         for task in self.store.due(now=now):
             try:

@@ -219,6 +219,71 @@ class StoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.get(task.task_id).arguments, {"stream": "music", "level": 7})
 
+    def test_a_finished_one_off_is_marked_completed_not_paused(self):
+        task = self._add(
+            schedule_kind=ONCE, run_at=self.now + 60, interval_seconds=None
+        )
+        self.store.record_run(task.task_id, "ok", now=self.now + 60)
+        reloaded = self.store.get(task.task_id)
+        self.assertTrue(reloaded.is_completed)
+        self.assertTrue(reloaded.as_dict()["completed"])
+
+    def test_a_paused_task_that_never_ran_is_not_completed(self):
+        task = self._add(
+            schedule_kind=ONCE, run_at=self.now + 60, interval_seconds=None
+        )
+        self.store.set_enabled(task.task_id, False)
+        self.assertFalse(self.store.get(task.task_id).is_completed)
+
+    def test_a_repeating_task_is_never_completed(self):
+        task = self._add(interval_seconds=900)
+        self.store.record_run(task.task_id, "ok", now=task.next_run_at)
+        self.assertFalse(self.store.get(task.task_id).is_completed)
+
+    def test_a_finished_one_off_stays_visible_for_a_day(self):
+        task = self._add(
+            schedule_kind=ONCE, run_at=self.now + 60, interval_seconds=None
+        )
+        self.store.record_run(task.task_id, "ok", now=self.now + 60)
+        self.assertEqual(self.store.purge_completed(now=self.now + 60 + 23 * HOUR), 0)
+        self.assertIsNotNone(self.store.get(task.task_id))
+
+    def test_a_finished_one_off_is_forgotten_after_a_day(self):
+        task = self._add(
+            schedule_kind=ONCE, run_at=self.now + 60, interval_seconds=None
+        )
+        self.store.record_run(task.task_id, "ok", now=self.now + 60)
+        self.assertEqual(self.store.purge_completed(now=self.now + 60 + 25 * HOUR), 1)
+        self.assertIsNone(self.store.get(task.task_id))
+
+    def test_purging_never_touches_a_repeating_task(self):
+        """Even a paused daily task is something the owner chose to keep."""
+        task = self._add(
+            schedule_kind=DAILY, daily_time="07:00", interval_seconds=None
+        )
+        self.store.record_run(task.task_id, "ok", now=task.next_run_at)
+        self.store.set_enabled(task.task_id, False)
+        self.assertEqual(self.store.purge_completed(now=self.now + 10 * DAY), 0)
+        self.assertIsNotNone(self.store.get(task.task_id))
+
+    def test_purging_never_touches_a_pending_one_off(self):
+        task = self._add(
+            schedule_kind=ONCE, run_at=self.now + 10 * DAY, interval_seconds=None
+        )
+        self.assertEqual(self.store.purge_completed(now=self.now + 5 * DAY), 0)
+        self.assertIsNotNone(self.store.get(task.task_id))
+
+    def test_purging_frees_capacity(self):
+        for index in range(3):
+            task = self._add(
+                description=f"one-off {index}", schedule_kind=ONCE,
+                run_at=self.now + 60, interval_seconds=None,
+            )
+            self.store.record_run(task.task_id, "ok", now=self.now + 60)
+        self.store.purge_completed(now=self.now + 25 * HOUR)
+        self._add(description="room again")
+        self.assertEqual(len(self.store.all_tasks()), 1)
+
     def test_summary_is_json_safe(self):
         task = self._add()
         payload = task.as_dict()

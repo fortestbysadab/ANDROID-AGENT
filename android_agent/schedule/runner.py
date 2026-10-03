@@ -102,7 +102,7 @@ class ScheduleRunner:
         """Run everything that is due. Never raises."""
         self.store.purge_completed(now=now)
         runs: list[TaskRun] = []
-        for task in self.store.due(now=now):
+        for task in self.store.claim_due(now=now):
             try:
                 run = self.run_task(task)
             except Exception as exc:  # a scheduler that dies is worse than a bad task
@@ -111,7 +111,9 @@ class ScheduleRunner:
                     task.task_id, task.description, "error",
                     f"The scheduled task '{task.description}' crashed: {type(exc).__name__}.",
                 )
-            self.store.record_run(task.task_id, run.status, now=now)
+            self.store.record_run(
+                task.task_id, run.status, now=now, scheduled_for=task.next_run_at
+            )
             self.audit.emit(
                 "schedule.ran",
                 {"task_id": task.task_id, "status": run.status, "kind": task.task_kind},

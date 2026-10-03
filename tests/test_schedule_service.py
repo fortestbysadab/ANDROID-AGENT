@@ -257,3 +257,66 @@ class CatalogueWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrentTickerTests(unittest.TestCase):
+    """The live agent and the Android job can tick at the same moment."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "s.db"
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def _runner(self, store):
+        def battery(context, arguments):
+            with self.lock:
+                self.calls.append("battery")
+            return ToolResult.ok("91%", {})
+
+        registry = ToolRegistry([
+            ToolSpec("get_battery_status", "Battery.", NO_ARGS, Risk.READ_ONLY,
+                     battery, timeout_seconds=2),
+        ])
+        policy = DefaultPolicy(OWNER)
+        planner = type("P", (), {"complete": lambda s, m, t: PlannerResponse(text="ok")})()
+        runtime = AgentRuntime(
+            planner=planner, registry=registry, policy=policy,
+            system_prompt="x", audit=MemoryAuditSink(),
+        )
+        return ScheduleRunner(
+            store=store, runtime=runtime, unattended_runtime=runtime,
+            owner_id=OWNER, chat_id=77, reporter=lambda run: None,
+        )
+
+    def test_two_tickers_do_not_double_run_a_task(self):
+        from android_agent.schedule.store import INTERVAL, TOOL, build_task
+
+        store_a = ScheduleStore(self.path)
+        self.addCleanup(store_a.close)
+        store_b = ScheduleStore(self.path)
+        self.addCleanup(store_b.close)
+        task = store_a.add(build_task(
+            description="Battery", task_kind=TOOL, schedule_kind=INTERVAL,
+            tool_name="get_battery_status", interval_seconds=900,
+        ))
+
+        runner_a, runner_b = self._runner(store_a), self._runner(store_b)
+        due_at = task.next_run_at + 1
+        barrier = threading.Barrier(2)
+
+        def tick(runner):
+            barrier.wait()
+            runner.tick(now=due_at)
+
+        threads = [
+            threading.Thread(target=tick, args=(runner_a,)),
+            threading.Thread(target=tick, args=(runner_b,)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(self.calls, ["battery"], "task ran more than once")

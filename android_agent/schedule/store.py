@@ -36,6 +36,10 @@ DEFAULT_MAX_TASKS = 50
 #: the schedule does not become a graveyard. A repeating task is never
 #: purged: it is still part of the schedule precisely because it repeats.
 COMPLETED_RETENTION_SECONDS = 24 * 3600
+#: How long a claimed task is held before another ticker may retry it. Long
+#: enough for the slowest tool to finish, short enough that a process killed
+#: mid-run does not lose the task for good.
+CLAIM_LEASE_SECONDS = 300
 
 ONCE = "once"
 INTERVAL = "interval"
@@ -159,9 +163,16 @@ class ScheduleStore:
         self.path = str(path)
         self.max_tasks = max_tasks
         self._lock = threading.Lock()
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        # isolation_level=None puts sqlite3 in autocommit mode so transactions
+        # are explicit. claim_due needs a real write lock held across its read,
+        # and the implicit transaction handling will not give it one.
+        self._connection = sqlite3.connect(
+            self.path, check_same_thread=False, isolation_level=None, timeout=10.0
+        )
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
+        # Wait rather than fail when the other ticker holds the write lock.
+        self._connection.execute("PRAGMA busy_timeout=10000")
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS tasks (
@@ -242,14 +253,68 @@ class ScheduleStore:
             ).fetchall()
         return [_row_to_task(row) for row in rows]
 
-    def record_run(self, task_id: str, status: str, *, now: float | None = None) -> None:
-        """Mark a run and move the task to its next slot, or retire it."""
+    def claim_due(
+        self, *, now: float | None = None, lease_seconds: float = CLAIM_LEASE_SECONDS
+    ) -> list[ScheduledTask]:
+        """Take ownership of everything due, so no one else runs it too.
+
+        Two tickers can be alive at once: the loop inside a running agent and
+        a persisted Android job that fires when the agent is dead but has not
+        been noticed yet. Selecting due tasks and running them in two steps
+        would let both pick the same task and send the owner two messages, or
+        two SMS. Claiming pushes the next run forward by a lease in the same
+        transaction as the read, so the second ticker sees nothing due.
+
+        If the claiming process dies mid-run the lease expires and the task is
+        retried, which is the right failure direction for a reminder.
+        """
+        moment = time.time() if now is None else now
+        with self._lock:
+            # BEGIN IMMEDIATE takes the write lock before the read. Without it
+            # two processes can both SELECT the same due row and both UPDATE
+            # it, and the owner gets two of everything. The in-process lock
+            # above cannot help: the other ticker is a different process.
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._connection.execute(
+                    "SELECT * FROM tasks WHERE enabled = 1 AND next_run_at <= ? "
+                    "ORDER BY next_run_at ASC",
+                    (moment,),
+                ).fetchall()
+                claimed = [_row_to_task(row) for row in rows]
+                if claimed:
+                    self._connection.executemany(
+                        "UPDATE tasks SET next_run_at = ? WHERE task_id = ?",
+                        [(moment + lease_seconds, task.task_id) for task in claimed],
+                    )
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._connection.execute("ROLLBACK")
+                raise
+        return claimed
+
+    def record_run(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        now: float | None = None,
+        scheduled_for: float | None = None,
+    ) -> None:
+        """Mark a run and move the task to its next slot, or retire it.
+
+        `scheduled_for` is the time the task was *due*, which the caller knows
+        and the row no longer does once the task has been claimed. Interval
+        schedules are advanced from it so a task keeps its phase instead of
+        drifting by however long each run took.
+        """
         moment = time.time() if now is None else now
         task = self.get(task_id)
         if task is None:
             return
+        due_at = scheduled_for if scheduled_for is not None else task.next_run_at
         if task.schedule_kind == ONCE:
-            next_run, enabled = task.next_run_at, False
+            next_run, enabled = due_at, False
         elif task.schedule_kind == DAILY:
             hour, minute = (int(part) for part in (task.daily_time or "0:0").split(":"))
             next_run, enabled = next_daily_run(hour, minute, now=moment), True
@@ -257,9 +322,9 @@ class ScheduleStore:
             interval = task.interval_seconds or JOB_SCHEDULER_FLOOR_SECONDS
             # Skip forward past any slots missed while the phone was off, so a
             # task dormant for a day does not fire a hundred times at once.
-            elapsed = max(0.0, moment - task.next_run_at)
+            elapsed = max(0.0, moment - due_at)
             skipped = int(elapsed // interval) + 1
-            next_run, enabled = task.next_run_at + skipped * interval, True
+            next_run, enabled = due_at + skipped * interval, True
 
         with self._lock:
             self._connection.execute(

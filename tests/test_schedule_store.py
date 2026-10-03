@@ -294,3 +294,84 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaimTests(unittest.TestCase):
+    """Two tickers can be alive at once: the agent's loop and the Android job.
+
+    Without claiming, both would select the same due task and run it, sending
+    the owner two messages - or two SMS.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "schedule.db"
+        self.store = ScheduleStore(self.path)
+        self.addCleanup(self.store.close)
+        self.now = time.time()
+
+    def _add(self, **overrides):
+        options = {
+            "description": "Battery", "task_kind": TOOL, "schedule_kind": INTERVAL,
+            "tool_name": "get_battery_status", "interval_seconds": 900, "now": self.now,
+        }
+        options.update(overrides)
+        return self.store.add(build_task(**options))
+
+    def test_a_claimed_task_is_not_offered_twice(self):
+        self._add()
+        due_at = self.now + 1000
+        first = self.store.claim_due(now=due_at)
+        second = self.store.claim_due(now=due_at)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [])
+
+    def test_a_second_process_sees_nothing(self):
+        """Separate connection, as a JobScheduler tick would have."""
+        self._add()
+        other = ScheduleStore(self.path)
+        self.addCleanup(other.close)
+        due_at = self.now + 1000
+        self.assertEqual(len(self.store.claim_due(now=due_at)), 1)
+        self.assertEqual(other.claim_due(now=due_at), [])
+
+    def test_the_claim_expires_so_a_crashed_run_is_retried(self):
+        self._add()
+        due_at = self.now + 1000
+        self.store.claim_due(now=due_at, lease_seconds=60)
+        self.assertEqual(self.store.claim_due(now=due_at + 30), [])
+        self.assertEqual(len(self.store.claim_due(now=due_at + 61)), 1)
+
+    def test_claiming_returns_the_original_due_time(self):
+        """record_run needs it; the row no longer holds it after a claim."""
+        task = self._add()
+        claimed = self.store.claim_due(now=task.next_run_at + 5)[0]
+        self.assertEqual(claimed.next_run_at, task.next_run_at)
+
+    def test_interval_phase_is_kept_across_a_claim(self):
+        task = self._add(interval_seconds=900)
+        claimed = self.store.claim_due(now=task.next_run_at + 5)[0]
+        self.store.record_run(
+            task.task_id, "ok", now=task.next_run_at + 20,
+            scheduled_for=claimed.next_run_at,
+        )
+        reloaded = self.store.get(task.task_id)
+        self.assertAlmostEqual(reloaded.next_run_at, task.next_run_at + 900, delta=1)
+
+    def test_a_one_off_still_retires_after_a_claim(self):
+        task = self._add(
+            schedule_kind=ONCE, run_at=self.now + 60, interval_seconds=None
+        )
+        claimed = self.store.claim_due(now=self.now + 61)[0]
+        self.store.record_run(
+            task.task_id, "ok", now=self.now + 61, scheduled_for=claimed.next_run_at
+        )
+        self.assertFalse(self.store.get(task.task_id).enabled)
+
+    def test_peeking_does_not_claim(self):
+        """__main__ peeks before paying to build a registry."""
+        self._add()
+        due_at = self.now + 1000
+        self.assertEqual(len(self.store.due(now=due_at)), 1)
+        self.assertEqual(len(self.store.claim_due(now=due_at)), 1)

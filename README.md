@@ -202,6 +202,38 @@ A one-off task is history once it has run, not schedule. It stays listed as
 deleted automatically. Repeating tasks are never purged - including ones you
 have paused, since pausing is a choice to keep them.
 
+### Surviving Termux being killed
+
+The in-process scheduler only runs while `agent_bot.py` is alive, and Android
+kills Termux freely. To have tasks fire anyway, register a persisted Android
+job once:
+
+```sh
+bash scripts/install_schedule_job.sh      # --cancel to remove
+termux-job-scheduler -p                   # confirm it is registered
+tail -f ~/telegram_agent_v2/schedule-job.log
+```
+
+That runs `python -m android_agent.schedule`, a one-shot tick that fires
+anything due and exits within seconds. It delivers results to Telegram over
+HTTPS directly, because the bot process is exactly what may not be running.
+Short-lived by design: a process that exits quickly is far less likely to be
+killed mid-flight.
+
+Two settings decide whether it fires at all. The job is owned by Termux:API
+and executed by Termux, so **both** need Battery > Unrestricted, and on
+Android 14+ *Disable child process restrictions* should be on.
+
+Timing is approximate and cannot be otherwise: Android will not run a periodic
+job more often than every 15 minutes and defers it further while dozing. A
+07:00 daily task fires at the first tick at or after 07:00.
+
+Both tickers can be alive at once - the agent's loop and the Android job.
+Tasks are therefore *claimed* in a single locked transaction before running,
+so the same task cannot fire twice and send two messages. A claim expires
+after five minutes, so a process killed mid-task retries rather than losing
+it.
+
 While the agent is running, the scheduler checks every 30 seconds. Intervals
 below 15 minutes are accepted but only hold while the process is alive -
 Android's JobScheduler will not wake the phone more often than that. If the

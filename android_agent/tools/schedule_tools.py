@@ -30,6 +30,7 @@ from android_agent.schedule.store import (
     TOOL,
     ScheduleError,
     ScheduleStore,
+    at_local_time,
     build_task,
 )
 
@@ -52,9 +53,23 @@ SCHEDULE_SCHEMA = {
             "type": "string", "pattern": r"^[0-9]{1,2}:[0-9]{2}$",
             "description": "Local time for a daily task, e.g. '07:30'.",
         },
+        "at_time": {
+            "type": "string", "pattern": r"^[0-9]{1,2}:[0-9]{2}$",
+            "description": "For 'once': the clock time to run it, 24-hour, in "
+                           "the device's own timezone, e.g. '23:10' for 11:10 "
+                           "PM. Prefer this whenever the owner names a time. "
+                           "Today if that time is still ahead, otherwise "
+                           "tomorrow unless tomorrow is set.",
+        },
+        "tomorrow": {
+            "type": "boolean",
+            "description": "With at_time, force the next day rather than today.",
+        },
         "in_minutes": {
             "type": "integer", "minimum": 1, "maximum": 10080,
-            "description": "For 'once': how many minutes from now to run it.",
+            "description": "For 'once': minutes from now. Use only when the "
+                           "owner says a duration ('in 20 minutes'), never to "
+                           "convert a clock time.",
         },
         "every_minutes": {
             "type": "integer", "minimum": 1, "maximum": 10080,
@@ -90,6 +105,17 @@ TASK_ID_SCHEMA = {
 }
 
 NO_ARGS = {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+def _parse_clock(value: str) -> tuple[int, int]:
+    hour_text, _, minute_text = str(value).partition(":")
+    try:
+        hour, minute = int(hour_text), int(minute_text)
+    except ValueError as exc:
+        raise ScheduleError("Give the time as HH:MM, e.g. 23:10.") from exc
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ScheduleError("That is not a real time of day.")
+    return hour, minute
 
 
 def _ago(moment: float | None) -> str:
@@ -144,13 +170,31 @@ def schedule_tools(
 
         run_at = None
         if schedule_kind == ONCE:
+            at_time = arguments.get("at_time")
             minutes = arguments.get("in_minutes")
-            if not minutes:
+            if at_time and minutes:
                 return ToolResult.error(
-                    "For a one-off task say how many minutes from now to run it.",
+                    "Give either a clock time or a number of minutes, not both.",
                     code="invalid_arguments",
                 )
-            run_at = time.time() + minutes * 60
+            if at_time:
+                try:
+                    hour, minute = _parse_clock(at_time)
+                except ScheduleError as exc:
+                    return ToolResult.error(str(exc), code="invalid_schedule")
+                run_at = at_local_time(hour, minute)
+                # A time already gone means they meant tomorrow, which is also
+                # what "tomorrow at 7" asks for explicitly.
+                if arguments.get("tomorrow") or run_at <= time.time():
+                    run_at = at_local_time(hour, minute, day_offset=1)
+            elif minutes:
+                run_at = time.time() + minutes * 60
+            else:
+                return ToolResult.error(
+                    "For a one-off task give at_time (a clock time) or "
+                    "in_minutes (a duration).",
+                    code="invalid_arguments",
+                )
         every_minutes = arguments.get("every_minutes")
 
         try:

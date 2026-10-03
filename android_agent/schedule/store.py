@@ -59,6 +59,23 @@ def new_task_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def at_local_time(
+    hour: int, minute: int, *, day_offset: int = 0, now: float | None = None
+) -> float:
+    """A local wall-clock time today (or `day_offset` days later) as epoch.
+
+    Used for one-off tasks given as a clock time. Resolving "11:10 PM" here
+    rather than asking the model for minutes-from-now removes arithmetic it
+    has no reliable way to do.
+    """
+    moment = time.time() if now is None else now
+    parts = time.localtime(moment)
+    return time.mktime(
+        (parts.tm_year, parts.tm_mon, parts.tm_mday + day_offset,
+         hour, minute, 0, 0, 0, -1)
+    )
+
+
 def next_daily_run(hour: int, minute: int, *, now: float | None = None) -> float:
     """Next occurrence of a local wall-clock time, strictly in the future."""
     moment = time.time() if now is None else now
@@ -114,7 +131,9 @@ class ScheduledTask:
             "prompt": self.prompt,
             "schedule": self.schedule_text(),
             "next_run_at": self.next_run_at,
-            "next_run_local": time.strftime("%Y-%m-%d %H:%M", time.localtime(self.next_run_at)),
+            "next_run_local": time.strftime(
+                "%Y-%m-%d %H:%M %Z", time.localtime(self.next_run_at)
+            ).strip(),
             "enabled": self.enabled,
             "completed": self.is_completed,
             "last_run_at": self.last_run_at,
@@ -129,7 +148,9 @@ class ScheduledTask:
         if self.schedule_kind == INTERVAL:
             minutes = (self.interval_seconds or 0) / 60
             return f"every {minutes:g} minutes"
-        return "once, at " + time.strftime("%Y-%m-%d %H:%M", time.localtime(self.next_run_at))
+        return "once, at " + time.strftime(
+            "%a %d %b %H:%M %Z", time.localtime(self.next_run_at)
+        ).strip()
 
 
 def _row_to_task(row: sqlite3.Row) -> ScheduledTask:

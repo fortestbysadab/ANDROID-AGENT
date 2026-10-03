@@ -168,6 +168,17 @@ schedule?"*, *"cancel the morning one"*. Four tools back this -
 `authorize_scheduled_task`. Tasks live in `schedule.db` in the state
 directory and survive restarts.
 
+Times are the device's own clock and timezone throughout. The current date,
+time and timezone are included in every turn's system message, because a model
+with no clock cannot resolve "today" or "tonight" and will quietly invent an
+offset.
+
+For a one-off, give the **clock time** (`at_time: "23:10"`) rather than a
+duration - it is resolved on the device, so no arithmetic is involved. Today
+if that time is still ahead, otherwise tomorrow. `in_minutes` remains for
+genuine durations like "in 20 minutes". Listings show the timezone, so a wrong
+one is visible rather than silent.
+
 A task is either a **fixed tool call** with fixed arguments, or a
 **natural-language instruction** carried out by the agent. One-off, daily at a
 local time, or every N minutes.

@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
@@ -67,6 +68,7 @@ class AgentRuntime:
         limits: RuntimeLimits | None = None,
         audit: AuditSink | None = None,
         skill_router: SkillRouter | None = None,
+        clock: Callable[[], str] | None = None,
     ) -> None:
         self.planner = planner
         self.registry = registry
@@ -75,6 +77,11 @@ class AgentRuntime:
         self.limits = limits or RuntimeLimits()
         self.audit = audit or NullAuditSink()
         self.skill_router = skill_router
+        #: The model has no clock. Without one it cannot resolve "today",
+        #: "tonight" or "in an hour", and will silently invent an offset -
+        #: which is how a task asked for at 11:10 PM was scheduled for 07:59
+        #: the next morning.
+        self.clock = clock or _local_time_line
 
     def run(
         self,
@@ -91,7 +98,9 @@ class AgentRuntime:
             self.skill_router.instructions_for(user_text) if self.skill_router is not None else ""
         )
         system_content = "\n\n".join(
-            part for part in (self.system_prompt, skill_instructions) if part.strip()
+            part
+            for part in (self.system_prompt, self.clock(), skill_instructions)
+            if part.strip()
         )
         if system_content:
             messages.append({"role": "system", "content": system_content})
@@ -294,6 +303,22 @@ class AgentRuntime:
             tuple(results),
             messages=tuple(messages),
         )
+
+
+def _local_time_line() -> str:
+    """The device's current date and time, in its own timezone.
+
+    Included in every run's system message. Phrased as a fact rather than an
+    instruction so it reads naturally wherever the model needs it.
+    """
+    now = time.localtime()
+    zone = time.strftime("%Z", now) or "local time"
+    return (
+        "Current device date and time: "
+        f"{time.strftime('%A %d %B %Y, %H:%M', now)} ({zone}). "
+        "Use this whenever the owner says today, tonight, tomorrow or a clock "
+        "time; never assume a different timezone."
+    )
 
 
 def _planner_failure_text(exc: Exception) -> str:

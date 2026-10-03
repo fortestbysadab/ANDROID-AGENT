@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 
 from android_agent.agent.runtime import AgentRuntime, RunStatus, RuntimeLimits
@@ -213,3 +214,48 @@ class AuditDiagnosticsTests(unittest.TestCase):
         failed = [event for event in events if event["event"] == "tool.failed"]
         self.assertNotIn("Alice", json.dumps(failed[0]))
         self.assertNotIn("90000", json.dumps(failed[0]))
+
+
+class ClockInPromptTests(unittest.TestCase):
+    """The model must be told what time it is.
+
+    Without it, "schedule a call at 11:30 PM today" is unanswerable: the model
+    cannot know how far away that is, and will invent an offset. That is
+    exactly how a task asked for at 23:10 was scheduled for 07:59 the next
+    morning.
+    """
+
+    def _run(self, **kwargs):
+        planner = FakePlanner(PlannerResponse(text="done"))
+        runtime = AgentRuntime(
+            planner=planner,
+            registry=ToolRegistry([make_tool()]),
+            policy=DefaultPolicy("42"),
+            system_prompt="Be useful.",
+            **kwargs,
+        )
+        runtime.run("what time is it", actor_id="42", chat_id=42)
+        messages, _ = planner.requests[0]
+        return messages[0]["content"]
+
+    def test_the_system_message_carries_the_current_time(self):
+        system = self._run()
+        self.assertIn("Current device date and time", system)
+        self.assertIn(time.strftime("%H:%M"), system)
+
+    def test_it_names_the_device_timezone(self):
+        zone = time.strftime("%Z")
+        if zone:
+            self.assertIn(zone, self._run())
+
+    def test_it_tells_the_model_to_use_it_for_relative_words(self):
+        system = self._run()
+        self.assertIn("today", system)
+        self.assertIn("tomorrow", system)
+
+    def test_the_original_system_prompt_is_still_present(self):
+        self.assertIn("Be useful.", self._run())
+
+    def test_the_clock_is_injectable(self):
+        system = self._run(clock=lambda: "Current device date and time: TEST")
+        self.assertIn("TEST", system)

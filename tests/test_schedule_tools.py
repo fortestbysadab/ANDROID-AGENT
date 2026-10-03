@@ -132,6 +132,102 @@ class CreationTests(ScheduleToolsTestCase):
         self.assertEqual(result.error_code, "schedule_full")
 
 
+class ClockTimeTests(ScheduleToolsTestCase):
+    """Reproduces the reported bug.
+
+    At 23:13 on 3 October the owner asked for a screenshot "at 11:10 PM" and
+    a call "at 11:30 PM today". They were scheduled for 07:59 and 18:28 the
+    next day. The cause was that a one-off could only be expressed as
+    minutes-from-now, and the model was never told the current time, so it
+    invented an offset. A clock time is now resolved here instead.
+    """
+
+    def _next_run(self, **arguments):
+        result = self.call("schedule_task", **arguments)
+        self.assertEqual(result.status, "ok", result.summary)
+        return self.store.all_tasks()[-1].next_run_at
+
+    def test_a_clock_time_later_today_is_scheduled_today(self):
+        target = time.localtime(time.time() + 2 * 3600)
+        at_time = time.strftime("%H:%M", target)
+        when = time.localtime(self._next_run(
+            description="Call", schedule="once", at_time=at_time,
+            tool_name="get_battery_status",
+        ))
+        self.assertEqual(time.strftime("%H:%M", when), at_time)
+        self.assertEqual(when.tm_mday, target.tm_mday)
+
+    def test_a_clock_time_already_past_rolls_to_tomorrow(self):
+        target = time.localtime(time.time() - 2 * 3600)
+        at_time = time.strftime("%H:%M", target)
+        scheduled = self._next_run(
+            description="Call", schedule="once", at_time=at_time,
+            tool_name="get_battery_status",
+        )
+        self.assertGreater(scheduled, time.time())
+        self.assertEqual(time.strftime("%H:%M", time.localtime(scheduled)), at_time)
+
+    def test_tomorrow_forces_the_next_day(self):
+        target = time.localtime(time.time() + 2 * 3600)
+        at_time = time.strftime("%H:%M", target)
+        scheduled = self._next_run(
+            description="Call", schedule="once", at_time=at_time, tomorrow=True,
+            tool_name="get_battery_status",
+        )
+        self.assertGreater(scheduled - time.time(), 20 * 3600)
+
+    def test_the_scheduled_time_matches_what_was_asked_to_the_minute(self):
+        """The reported symptom: asked 23:10, got 07:59."""
+        for at_time in ("23:10", "23:30", "00:05", "07:00", "12:00"):
+            with self.subTest(at_time=at_time):
+                scheduled = self._next_run(
+                    description=f"Task {at_time}", schedule="once", at_time=at_time,
+                    tool_name="get_battery_status",
+                )
+                self.assertEqual(
+                    time.strftime("%H:%M", time.localtime(scheduled)), at_time
+                )
+
+    def test_a_duration_still_works(self):
+        scheduled = self._next_run(
+            description="Soon", schedule="once", in_minutes=20,
+            tool_name="get_battery_status",
+        )
+        self.assertAlmostEqual(scheduled, time.time() + 1200, delta=5)
+
+    def test_giving_both_a_time_and_a_duration_is_refused(self):
+        result = self.call(
+            "schedule_task", description="Ambiguous", schedule="once",
+            at_time="23:10", in_minutes=20, tool_name="get_battery_status",
+        )
+        self.assertEqual(result.error_code, "invalid_arguments")
+
+    def test_giving_neither_is_refused(self):
+        result = self.call(
+            "schedule_task", description="When?", schedule="once",
+            tool_name="get_battery_status",
+        )
+        self.assertEqual(result.error_code, "invalid_arguments")
+
+    def test_an_impossible_clock_time_is_refused(self):
+        result = self.call(
+            "schedule_task", description="Bad", schedule="once", at_time="25:00",
+            tool_name="get_battery_status",
+        )
+        self.assertEqual(result.error_code, "invalid_schedule")
+
+    def test_the_listing_shows_the_timezone(self):
+        """A wrong timezone should be visible, not silent."""
+        self.call(
+            "schedule_task", description="Call", schedule="once", at_time="23:30",
+            tool_name="get_battery_status",
+        )
+        listing = self.call("list_scheduled_tasks")
+        zone = time.strftime("%Z")
+        if zone:
+            self.assertIn(zone, listing.summary)
+
+
 class AuthorisationTests(ScheduleToolsTestCase):
     """Creating a task must never be a back door to a risky action."""
 

@@ -33,9 +33,15 @@ from android_agent.models.needle import (
 from android_agent.models.openai_compatible import OpenAICompatiblePlanner
 from android_agent.observability.audit import JsonlAuditSink
 from android_agent.observability.logging import configure_logging
-from android_agent.policy.engine import DefaultPolicy
+from android_agent.policy.engine import DefaultPolicy, PolicyDecision, UnattendedPolicy
+from android_agent.schedule import (
+    ScheduleRunner,
+    ScheduleService,
+    ScheduleStore,
+    approval_hash_for,
+)
 from android_agent.skills.loader import SkillRouter
-from android_agent.tools.base import ToolResult
+from android_agent.tools.base import SchemaValidationError, ToolContext, ToolResult
 from android_agent.tools.catalog import build_full_registry
 from android_agent.tools.media import describe_library, media_root, storage_advice
 
@@ -81,7 +87,37 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
     telebot.apihelper.ENABLE_MIDDLEWARE = True
     bot = telebot.TeleBot(settings.telegram_bot_token)
     audit_path = os.path.join(os.path.expanduser(settings.state_dir), "audit.jsonl")
-    registry = build_full_registry()
+    state_dir = os.path.expanduser(settings.state_dir)
+    schedule_store = ScheduleStore(os.path.join(state_dir, "schedule.db"))
+    owner_policy = DefaultPolicy(str(settings.owner_chat_id))
+
+    def needs_authorisation(tool_name, arguments, *, force=False):
+        """Hash this exact action, or None if the owner must authorise it first.
+
+        A scheduled run has nobody to answer an approval prompt, so anything
+        the policy would gate is stored unauthorised until the owner approves
+        it once through authorize_scheduled_task. `force` is that approval
+        having happened - the tool carrying it is itself approval-gated.
+        """
+        tool = registry.get(tool_name)
+        if tool is None:
+            return None
+        context = ToolContext(
+            str(settings.owner_chat_id), int(settings.owner_chat_id),
+            "schedule-authorisation", direct_user_request=False,
+        )
+        try:
+            validated = tool.validate(arguments)
+        except SchemaValidationError:
+            return None
+        decision = owner_policy.evaluate(context, tool, validated)
+        if decision.decision is not PolicyDecision.ALLOW and not force:
+            return None
+        return approval_hash_for(registry, tool_name, validated)
+
+    registry = build_full_registry(
+        schedule_store, needs_authorisation=needs_authorisation
+    )
     planner = OpenAICompatiblePlanner(
         base_url=settings.llm_base_url,
         model=settings.llm_model,
@@ -95,7 +131,17 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
     runtime = AgentRuntime(
         planner=planner,
         registry=registry,
-        policy=DefaultPolicy(str(settings.owner_chat_id)),
+        policy=owner_policy,
+        system_prompt=SYSTEM_PROMPT,
+        audit=JsonlAuditSink(audit_path),
+        skill_router=SkillRouter.bundled(),
+    )
+    # Same planner and tools; a policy that refuses anything needing
+    # confirmation, because a scheduled run has nobody to confirm it.
+    unattended_runtime = AgentRuntime(
+        planner=planner,
+        registry=registry,
+        policy=UnattendedPolicy(owner_policy),
         system_prompt=SYSTEM_PROMPT,
         audit=JsonlAuditSink(audit_path),
         skill_router=SkillRouter.bundled(),
@@ -369,6 +415,37 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             message_id=call.message.message_id,
         )
         send_artifacts(chat_id, result)
+
+    def report_scheduled(run) -> None:
+        """Deliver a finished scheduled task to the owner.
+
+        Every run reports, including failures: silence is indistinguishable
+        from "it never ran", which is the worst outcome for something the
+        owner is relying on.
+        """
+        prefix = {"ok": "⏰", "blocked": "🔒", "error": "⚠️"}.get(run.status, "⏰")
+        try:
+            bot.send_message(settings.owner_chat_id, f"{prefix} {run.message}"[:4000])
+            if run.result is not None:
+                send_artifacts(settings.owner_chat_id, run.result)
+        except Exception:
+            logger.exception("Could not deliver scheduled task %s", run.task_id)
+
+    schedule_runner = ScheduleRunner(
+        store=schedule_store,
+        runtime=runtime,
+        unattended_runtime=unattended_runtime,
+        owner_id=str(settings.owner_chat_id),
+        chat_id=int(settings.owner_chat_id),
+        reporter=report_scheduled,
+        audit=JsonlAuditSink(audit_path),
+    )
+    scheduler = ScheduleService(schedule_runner)
+    scheduler.start()
+    bot.schedule_service = scheduler
+    pending_tasks = [task for task in schedule_store.all_tasks() if task.enabled]
+    if pending_tasks:
+        logger.info("Scheduler resumed with %d task(s)", len(pending_tasks))
 
     return bot
 

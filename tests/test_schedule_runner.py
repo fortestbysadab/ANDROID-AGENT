@@ -90,7 +90,7 @@ class RunnerTestCase(unittest.TestCase):
         )
         self.runner = ScheduleRunner(
             store=self.store, runtime=self.runtime, unattended_runtime=self.unattended,
-            owner_id=OWNER, chat_id=CHAT, reporter=self.reported.append, audit=self.audit,
+            owner_id=OWNER, chat_id=CHAT, reporter=lambda run: self.reported.append(run.message), audit=self.audit,
         )
         self.now = time.time()
 
@@ -155,7 +155,7 @@ class UnattendedApprovalTests(RunnerTestCase):
         self.assertIn("approve it once", self.reported[0])
 
     def test_a_pre_approved_risky_task_runs_without_asking(self):
-        approved = approval_hash_for(self.runtime, "send_sms", self.SMS_ARGS)
+        approved = approval_hash_for(self.registry, "send_sms", self.SMS_ARGS)
         self.add(
             description="Morning text", tool_name="send_sms",
             arguments=self.SMS_ARGS, approved_hash=approved,
@@ -166,7 +166,7 @@ class UnattendedApprovalTests(RunnerTestCase):
 
     def test_approval_does_not_transfer_to_different_arguments(self):
         """The whole point of hashing: an approved task cannot be edited."""
-        approved = approval_hash_for(self.runtime, "send_sms", self.SMS_ARGS)
+        approved = approval_hash_for(self.registry, "send_sms", self.SMS_ARGS)
         self.add(
             description="Morning text", tool_name="send_sms",
             arguments={"number": "+919999999999", "text": "good morning"},
@@ -177,7 +177,7 @@ class UnattendedApprovalTests(RunnerTestCase):
         self.assertEqual(self.calls, [])
 
     def test_approval_does_not_transfer_to_a_different_tool(self):
-        approved = approval_hash_for(self.runtime, "get_battery_status", {})
+        approved = approval_hash_for(self.registry, "get_battery_status", {})
         self.add(
             description="Sneaky", tool_name="send_sms", arguments=self.SMS_ARGS,
             approved_hash=approved,
@@ -299,7 +299,7 @@ class ResilienceTests(RunnerTestCase):
         self.assertEqual([r.status for r in runs], ["error"])
 
     def test_a_failing_reporter_does_not_stop_the_scheduler(self):
-        def explode(message):
+        def explode(run):
             raise RuntimeError("telegram is down")
 
         self.runner.reporter = explode

@@ -160,6 +160,50 @@ network call beyond this server — so it still renders on an offline phone.
 run side by side. They share the audit log and the approval semantics, but keep
 independent conversations.
 
+## Scheduled tasks
+
+Ask in plain language: *"check my battery every morning at 7"*, *"what's my
+schedule?"*, *"cancel the morning one"*. Four tools back this -
+`schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` and
+`authorize_scheduled_task`. Tasks live in `schedule.db` in the state
+directory and survive restarts.
+
+A task is either a **fixed tool call** with fixed arguments, or a
+**natural-language instruction** carried out by the agent. One-off, daily at a
+local time, or every N minutes.
+
+### What runs unattended, and what does not
+
+Every approval gate in this project assumes you are there to answer it. A
+scheduled run removes you, so the rule is:
+
+- Actions the policy allows outright - reading the battery, taking a photo,
+  the torch - just run.
+- Actions that would normally ask for confirmation are **held** until you
+  authorise that task once. The exact tool and arguments are hashed into the
+  task at that moment, so an authorisation cannot later be moved to a
+  different number or a different tool. After that it runs unattended
+  forever, with no further prompts.
+- A natural-language task may use anything in the first group. If the model
+  decides mid-run that it wants something from the second, the run is refused
+  and you are told what it wanted - it is never left as a pending approval
+  for you to confirm hours later with no memory of what asked.
+
+Creating a task is itself only a reversible action, because creating one can
+never perform anything.
+
+### Reliability
+
+Every run reports to you, including failures: silence is indistinguishable
+from "it never ran".
+
+While the agent is running, the scheduler checks every 30 seconds. Intervals
+below 15 minutes are accepted but only hold while the process is alive -
+Android's JobScheduler will not wake the phone more often than that. If the
+phone was off or Termux was killed when a task was due, the missed slots are
+**skipped, not replayed**: a 15-minute task dormant overnight fires once on
+return, not ninety-six times.
+
 ## Captured media
 
 Photos, recordings and screenshots are **kept on the device**, filed by kind

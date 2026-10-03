@@ -31,13 +31,14 @@ from android_agent.models.base import ToolCall
 from android_agent.observability.audit import AuditSink, NullAuditSink
 from android_agent.policy.engine import PolicyDecision
 from android_agent.schedule.store import PROMPT, TOOL, ScheduledTask, ScheduleStore
-from android_agent.tools.base import SchemaValidationError, ToolContext
+from android_agent.tools.base import SchemaValidationError, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
-#: Deliver a finished run to the owner. Returns nothing; failures to deliver
-#: are logged by the caller, never raised into the scheduler loop.
-Reporter = Callable[[str], None]
+#: Deliver a finished run to the owner. Receives the whole run, not just its
+#: text, so a caller can also send any artifact the tool produced - a
+#: scheduled screenshot is useless as a sentence.
+Reporter = Callable[["TaskRun"], None]
 
 
 @dataclass(frozen=True)
@@ -46,19 +47,23 @@ class TaskRun:
     description: str
     status: str
     message: str
+    #: The tool result, when the task was a fixed tool call. Carries
+    #: artifact_path and coordinates for callers that can deliver them.
+    result: ToolResult | None = None
 
     @property
     def ok(self) -> bool:
         return self.status == "ok"
 
 
-def approval_hash_for(runtime: AgentRuntime, tool_name: str, arguments: Mapping[str, Any]):
+def approval_hash_for(registry, tool_name: str, arguments: Mapping[str, Any]):
     """Hash identifying one exact action, or None if the tool is unknown.
 
     Returned at creation time so the owner's authorisation can be frozen
-    against the precise arguments they saw.
+    against the precise arguments they saw. Takes a registry rather than a
+    runtime because the catalogue is built before the runtime exists.
     """
-    tool = runtime.registry.get(tool_name)
+    tool = registry.get(tool_name)
     if tool is None:
         return None
     try:
@@ -170,7 +175,7 @@ class ScheduleRunner:
         status = "ok" if result.status == "ok" else "error"
         return TaskRun(
             task.task_id, task.description, status,
-            f"{task.description}: {result.summary}",
+            f"{task.description}: {result.summary}", result,
         )
 
     def _run_prompt_task(self, task: ScheduledTask) -> TaskRun:
@@ -202,7 +207,7 @@ class ScheduleRunner:
 
     def _report(self, run: TaskRun) -> None:
         try:
-            self.reporter(run.message)
+            self.reporter(run)
         except Exception:
             # Delivery is best effort: Telegram being unreachable must not
             # stop the next task from running or corrupt the schedule.

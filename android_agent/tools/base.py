@@ -110,15 +110,27 @@ def _validate_value(value: Any, schema: Mapping[str, Any], path: str) -> Any:
         missing = sorted(required - set(value))
         if missing:
             raise SchemaValidationError(f"{path} is missing: {', '.join(missing)}")
-        if schema.get("additionalProperties", False) is False:
+        allows_extra = schema.get("additionalProperties", False) is True
+        if not allows_extra:
             unknown = sorted(set(value) - set(properties))
             if unknown:
                 raise SchemaValidationError(f"{path} has unknown fields: {', '.join(unknown)}")
-        return {
+        validated = {
             key: _validate_value(item, properties[key], f"{path}.{key}")
             for key, item in value.items()
             if key in properties
         }
+        if allows_extra:
+            # Pass undeclared fields through rather than dropping them. A
+            # schema that permits extra properties and then silently discards
+            # them is worse than one that rejects them: the caller sees a
+            # success and an empty object. Used by schedule_task, whose
+            # tool_arguments are opaque here and revalidated against the
+            # target tool's own schema before the task ever runs.
+            validated.update(
+                {key: item for key, item in value.items() if key not in properties}
+            )
+        return validated
     if expected == "array":
         if not isinstance(value, list):
             raise SchemaValidationError(f"{path} must be an array")

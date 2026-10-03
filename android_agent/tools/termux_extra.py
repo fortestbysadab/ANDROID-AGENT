@@ -87,6 +87,26 @@ def _normalise_number(raw: str) -> str:
     return ("+" if plus else "") + digits
 
 
+#: Placing a call means starting the dialer *activity* (ACTION_CALL). Since
+#: Android 10 an app with no visible window cannot start an activity at all,
+#: and the agent runs with Termux off screen whenever the owner is in a chat
+#: app - so the dial silently does nothing and the radio stays IDLE.
+#:
+#: Of the documented exemptions, exactly one is available to a Termux user:
+#: the SYSTEM_ALERT_WINDOW permission ("Display over other apps"). Termux
+#: declares that permission in its manifest for precisely this reason, so the
+#: owner only has to grant it. No amount of agent-side code substitutes for
+#: it: the restriction is enforced by the platform.
+_FOREGROUND_ACTIVITY_HELP = (
+    "Android blocks apps with nothing on screen from starting the dialer. Grant "
+    "Termux 'Display over other apps' (Android Settings > Apps > Termux > "
+    "Display over other apps) - that is the one exemption available to Termux, "
+    "and it is why calls work from an on-screen Termux session but not from a "
+    "chat. On realme/ColorOS also enable 'Display pop-up windows while running "
+    "in the background' for Termux. Otherwise, open Termux first and retry."
+)
+
+
 def _place_call(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
     """Place a call, and be honest about whether it actually started.
 
@@ -124,8 +144,7 @@ def _place_call(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResul
             )
         if "timed out" in lowered:
             return ToolResult.error(
-                "The dialer did not respond. This usually means Termux is in the background; "
-                "Android blocks background apps from starting a call. Open Termux and retry.",
+                f"The dialer did not respond. {_FOREGROUND_ACTIVITY_HELP}",
                 code="call_timeout",
                 retryable=True,
             )
@@ -143,8 +162,8 @@ def _place_call(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResul
     if state == "IDLE":
         return ToolResult.error(
             f"The dial request for {number} was accepted but no call started. "
-            "Android blocks calls from background apps: bring Termux to the foreground, "
-            "and check Termux:API has the Phone permission.",
+            f"{_FOREGROUND_ACTIVITY_HELP} Also check Termux:API has the Phone "
+            "permission (Settings > Apps > Termux:API > Permissions > Phone).",
             code="call_not_started",
             retryable=True,
         )
@@ -708,6 +727,6 @@ def extra_termux_tools() -> list[ToolSpec]:
         ToolSpec("search_contacts", "Search Android contacts by a partial person or contact name. Use only when the owner asks to find contact details. Results contain sensitive phone numbers and are limited to ten matches.", text_arg("query", 100), Risk.SENSITIVE_READ, _contacts, idempotent=True),
         ToolSpec("get_recent_sms", "Read up to five recent SMS inbox messages. Use only when the owner explicitly asks to inspect recent texts or the SMS inbox. Message sender and body are sensitive data.", no_args, Risk.SENSITIVE_READ, _json_command(["termux-sms-list", "-l", "5"], "Recent SMS messages retrieved."), idempotent=True),
         ToolSpec("get_notifications", "Read up to the currently active Android notifications. Use only when the owner asks to check notifications. Notification titles and content may contain sensitive data.", no_args, Risk.SENSITIVE_READ, _json_command(["termux-notification-list"], "Active notifications retrieved."), idempotent=True),
-        ToolSpec("place_phone_call", "Place a phone call to an exact number supplied by the owner. Use only when the owner explicitly asks to call that number. This external side effect requires confirmation before execution.", {"type": "object", "properties": {"number": {"type": "string", "minLength": 3, "maxLength": 25, "pattern": PHONE_PATTERN}}, "required": ["number"], "additionalProperties": False}, Risk.EXTERNAL_SIDE_EFFECT, _place_call, timeout_seconds=35.0),
+        ToolSpec("place_phone_call", "Place a phone call to an exact number supplied by the owner. Use only when the owner explicitly asks to call that number. This external side effect requires confirmation before execution. If it reports that no call started, say so plainly and pass on the remedy rather than claiming the call was placed.", {"type": "object", "properties": {"number": {"type": "string", "minLength": 3, "maxLength": 25, "pattern": PHONE_PATTERN}}, "required": ["number"], "additionalProperties": False}, Risk.EXTERNAL_SIDE_EFFECT, _place_call, timeout_seconds=35.0),
         ToolSpec("send_sms", "Send an SMS to one exact phone number with exact message text. Use only when the owner explicitly asks to send the message, preserving destination and content. This external side effect requires confirmation before execution.", {"type": "object", "properties": {"number": {"type": "string", "minLength": 3, "maxLength": 25, "pattern": PHONE_PATTERN}, "message": {"type": "string", "minLength": 1, "maxLength": 1600}}, "required": ["number", "message"], "additionalProperties": False}, Risk.EXTERNAL_SIDE_EFFECT, _command(lambda a: ["termux-sms-send", "-n", a["number"], a["message"]], lambda a: f"SMS sent to {a['number']}.")),
     ]

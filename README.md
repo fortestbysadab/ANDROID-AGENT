@@ -375,20 +375,37 @@ termux-location -p gps -r last     # what the agent reads first
 termux-location -p gps -r once     # compare; slow in the background
 ```
 
-### Phone calls
+### Phone calls, dialogs and other on-screen actions
 
-`termux-telephony-call` often exits 0 while doing nothing, so a naive
-implementation reports a call it never placed. Two causes:
+Placing a call starts the dialer **activity**. Since Android 10, an app with
+no visible window
+[cannot start an activity at all](https://developer.android.com/guide/components/activities/background-starts),
+and the agent runs with Termux off screen whenever you are messaging it from a
+chat app. `termux-telephony-call` still exits 0, so a naive implementation
+reports a call it never placed.
 
-1. **Termux:API lacks the Phone permission.** Android Settings > Apps >
-   Termux:API > Permissions > Phone.
-2. **Termux is in the background.** Android blocks background apps from
-   starting a call. Bring Termux to the foreground and retry.
+Of the documented exemptions, exactly one is available to a Termux user: the
+**SYSTEM_ALERT_WINDOW** permission. Termux
+[declares it in its manifest](https://github.com/termux/termux-app/pull/1764)
+for this exact purpose, so you only have to grant it:
 
-The agent now confirms the call by reading the telephony call state after
-dialling, and reports `call_not_started` with the fix instead of a false
-success. Numbers are validated against a strict pattern and normalised before
-being passed as a single argv element.
+- Android Settings > Apps > **Termux** > **Display over other apps** > allow.
+- On realme/ColorOS, also enable **Display pop-up windows while running in the
+  background** for Termux.
+- Settings > Apps > **Termux:API** > Permissions > **Phone** > allow.
+
+Without that permission, calls work from an on-screen Termux session and fail
+silently from a chat - the same foreground/background asymmetry as location,
+with a different remedy.
+
+The agent confirms the call by reading the telephony call state after dialling
+and reports `call_not_started` with the remedy instead of a false success.
+Numbers are validated against a strict pattern and normalised before being
+passed as a single argv element.
+
+The same restriction applies to anything else that puts UI on screen:
+`show_text_dialog` and `authenticate_fingerprint` both launch activities and
+need the same permission to work from a chat.
 
 ### Troubleshooting
 

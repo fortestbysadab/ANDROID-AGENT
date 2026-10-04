@@ -67,9 +67,11 @@ runs with a single third-party package.
 
 ```text
 ANDROID-AGENT/
-├── agent_bot.py                 # v2 Telegram composition root
-├── bot.py, config.py            # legacy v1, untouched, lint-excluded
+├── agent_bot.py                 # Telegram front end
 ├── android_agent/
+│   ├── __main__.py              # universal command: python -m android_agent
+│   ├── app.py                   # composition root: builds everything once
+├── bot.py, config.py            # legacy v1, untouched, lint-excluded
 │   ├── config.py                # Settings.from_env, validated
 │   ├── doctor.py                # configuration + connectivity diagnosis
 │   ├── agent/

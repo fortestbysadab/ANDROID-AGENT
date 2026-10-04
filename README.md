@@ -21,6 +21,20 @@ Five bundled skills add progressively loaded guidance for core reliability, devi
 
 ## Run v2
 
+One command runs everything that is configured:
+
+```sh
+python -m android_agent            # Telegram + web console + scheduler
+python -m android_agent bot        # Telegram only
+python -m android_agent web        # web console only
+python -m android_agent tick       # one scheduler pass, then exit
+python -m android_agent doctor     # diagnose the configuration
+```
+
+The older entry points (`python agent_bot.py`, `python -m android_agent.web`,
+`python -m android_agent.schedule`) still work and are what the persisted
+Android job calls.
+
 Termux must have Python, `termux-api`, the Termux:API Android app, and the relevant Android permissions.
 
 ```sh

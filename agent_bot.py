@@ -23,6 +23,7 @@ from telebot import types
 from android_agent.agent.runtime import AgentRuntime, RunStatus
 from android_agent.agent.session import SqliteSessionStore
 from android_agent.approvals.store import InMemoryApprovalStore
+from android_agent.channels import GmailChannel
 from android_agent.config import Settings
 from android_agent.models.needle import (
     DEFAULT_FAST_PATH_TOOLS,
@@ -115,8 +116,22 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             return None
         return approval_hash_for(registry, tool_name, validated)
 
+    email_channel = None
+    if settings.email_enabled:
+        email_channel = GmailChannel(
+            settings.email_address,
+            settings.email_app_password,
+            imap_host=settings.email_imap_host,
+            imap_port=settings.email_imap_port,
+            smtp_host=settings.email_smtp_host,
+            smtp_port=settings.email_smtp_port,
+        )
+        logger.info("Email connector enabled for %s", settings.email_address)
+
     registry = build_full_registry(
-        schedule_store, needs_authorisation=needs_authorisation
+        schedule_store,
+        needs_authorisation=needs_authorisation,
+        email_channel=email_channel,
     )
     planner = OpenAICompatiblePlanner(
         base_url=settings.llm_base_url,

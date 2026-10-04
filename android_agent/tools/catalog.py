@@ -9,12 +9,15 @@ from .termux import build_termux_registry
 from .termux_extra import extra_termux_tools
 
 
-def build_full_registry(schedule_store=None, *, needs_authorisation=None) -> ToolRegistry:
+def build_full_registry(
+    schedule_store=None, *, needs_authorisation=None, email_channel=None
+) -> ToolRegistry:
     """Build the catalogue.
 
-    The scheduling tools need a store to write to, so they are only added when
-    one is supplied. Callers without scheduling - tests, the doctor, one-shot
-    scripts - get exactly the previous catalogue.
+    Optional capabilities are only registered when their dependency is
+    supplied: scheduling needs a store, email needs a configured channel.
+    A caller that provides neither gets exactly the device-only catalogue, so
+    tests, the doctor and one-shot scripts are unaffected.
     """
     registry = build_termux_registry()
     for tool in [*file_tools(), *adb_tools(), *extra_termux_tools()]:
@@ -27,5 +30,10 @@ def build_full_registry(schedule_store=None, *, needs_authorisation=None) -> Too
         for tool in schedule_tools(
             schedule_store, registry, needs_authorisation=needs_authorisation
         ):
+            registry.register(tool)
+    if email_channel is not None:
+        from .email_tools import email_tools
+
+        for tool in email_tools(email_channel):
             registry.register(tool)
     return registry

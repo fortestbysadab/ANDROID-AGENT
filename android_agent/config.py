@@ -52,6 +52,19 @@ class Settings:
     state_dir: str = "~/telegram_agent_v2"
     needle_enabled: bool = False
     needle_confidence_threshold: float = 0.85
+    #: Email connector. Optional: absent settings simply mean no email tools.
+    #: Use a dedicated mailbox - an app password cannot be scoped, so this
+    #: credential can read and delete the whole account it belongs to.
+    email_address: str = ""
+    email_app_password: str = ""
+    email_imap_host: str = "imap.gmail.com"
+    email_imap_port: int = 993
+    email_smtp_host: str = "smtp.gmail.com"
+    email_smtp_port: int = 465
+
+    @property
+    def email_enabled(self) -> bool:
+        return bool(self.email_address and self.email_app_password)
 
     @classmethod
     def from_env(cls, *, require_telegram: bool = True) -> Settings:
@@ -132,6 +145,30 @@ class Settings:
         if not 0.0 < needle_threshold <= 1.0:
             raise ValueError("ANDROID_AGENT_NEEDLE_THRESHOLD must be between 0 and 1")
 
+        email_address = (os.environ.get("ANDROID_AGENT_EMAIL_ADDRESS") or "").strip()
+        email_password = (os.environ.get("ANDROID_AGENT_EMAIL_APP_PASSWORD") or "").strip()
+        # Half-configured email is a mistake worth catching at startup rather
+        # than when the owner first asks about their inbox.
+        if bool(email_address) != bool(email_password):
+            raise ValueError(
+                "Set both ANDROID_AGENT_EMAIL_ADDRESS and "
+                "ANDROID_AGENT_EMAIL_APP_PASSWORD, or neither"
+            )
+        if email_address and "@" not in email_address:
+            raise ValueError("ANDROID_AGENT_EMAIL_ADDRESS must be an email address")
+
+        def _port(name: str, default: int) -> int:
+            raw = (os.environ.get(name) or "").strip()
+            if not raw:
+                return default
+            try:
+                value = int(raw)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an integer") from exc
+            if not 1 <= value <= 65535:
+                raise ValueError(f"{name} must be a valid port")
+            return value
+
         api_key = (os.environ.get("ANDROID_AGENT_LLM_API_KEY") or "").strip() or None
         if dialect is Dialect.GEMINI and not api_key:
             raise ValueError(
@@ -154,6 +191,12 @@ class Settings:
             needle_enabled=os.environ.get("ANDROID_AGENT_NEEDLE", "").strip().lower()
             in {"1", "true", "yes", "on"},
             needle_confidence_threshold=needle_threshold,
+            email_address=email_address,
+            email_app_password=email_password,
+            email_imap_host=(os.environ.get("ANDROID_AGENT_EMAIL_IMAP_HOST") or "imap.gmail.com").strip(),
+            email_imap_port=_port("ANDROID_AGENT_EMAIL_IMAP_PORT", 993),
+            email_smtp_host=(os.environ.get("ANDROID_AGENT_EMAIL_SMTP_HOST") or "smtp.gmail.com").strip(),
+            email_smtp_port=_port("ANDROID_AGENT_EMAIL_SMTP_PORT", 465),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -169,4 +212,7 @@ class Settings:
             "session_ttl_minutes": round(self.session_ttl_seconds / 60, 1),
             "state_dir": self.state_dir,
             "needle_fast_path": self.needle_enabled,
+            # The address is useful in a log; the app password never is.
+            "email_address": self.email_address or "absent",
+            "email_app_password": "set" if self.email_app_password else "absent",
         }

@@ -153,38 +153,39 @@ Shape depends on **PRD Open Question 1**.
 - [ ] On-device smoke checklist (what to verify manually after a release)
 - [ ] Soak test: scheduler running for 24 h with the phone idle
 
-## Phase 8 — Channel connectors: Gmail `[ ]`
+## Phase 8 — Channel connectors: Gmail `[-]`
 
-Blocked on PRD Open Questions 6–8 (auth method, whether bodies may reach the
-cloud model, which mailbox). Design is in ARCHITECTURE.md § Email connector.
+Design in ARCHITECTURE.md § Email connector. Decisions taken 2026-10-04:
+dedicated mailbox, app password over OAuth, bodies may reach the model.
 
-- [ ] Decide auth: app password vs OAuth `[!]` blocked on Open Question 6
-- [ ] `channels/base.py` — Channel protocol (list / fetch / send)
-- [ ] `channels/gmail.py` — IMAP read + SMTP send, stdlib only
-      - Implementation notes: `imaplib`, `smtplib`, `email`; per-call
-        timeouts; bounded fetch count and body size; one retry on transient
-        failure
-      - Acceptance: a send is reported successful only if SMTP accepted it
-- [ ] Header and body decoding: RFC 2047 encoded-words, part charsets,
-      `text/plain` preferred, stdlib HTML strip
-      - Acceptance: Hindi, Bengali and emoji subjects round-trip correctly
-- [ ] `list_recent_email`, `read_email` — `sensitive_read`
-- [ ] `send_email`, `reply_to_email` — `external_side_effect`, approval+hash
-      - Acceptance: the approval prompt shows the real recipient, subject and
-        body, never a paraphrase
-- [ ] Settings + `.env.example`: address, app password, optional host/port
-      - Acceptance: the credential never appears in logs, audit or errors
-- [ ] **Taint rule** (prerequisite for safe summarising)
-      - Goal: once third-party content enters a run, external side effects
-        need a fresh approval; unattended tainted runs deny them
-      - Files: `agent/runtime.py`, `policy/engine.py`, `tools/base.py`
-      - Also hardens `get_recent_sms` and `get_notifications`, which have the
-        same exposure today
-      - Acceptance: an email body instructing the agent to send mail cannot
-        cause a send without a fresh owner approval
-- [ ] Untrusted-content delimiter around fetched bodies in the prompt
-- [ ] Inbox summary as a scheduled task, end to end
-- [ ] No delete / label / settings tool is exposed
+- [x] Auth decided: app password + IMAP/SMTP, stdlib only, no new dependency
+- [x] `channels/base.py` — Channel protocol, tidy/truncate, untrusted wrapper
+- [x] `channels/gmail.py` — IMAP read + SMTP send, injectable factories so the
+      whole path is testable without a network
+- [x] Header and body decoding: RFC 2047 encoded-words, part charsets,
+      text/plain preferred, stdlib HTML strip, character-safe truncation
+- [x] `list_recent_email`, `read_email` — `sensitive_read`, BODY.PEEK so
+      reading through the agent never marks the owner's mail as read
+- [x] `send_email`, `reply_to_email` — `external_side_effect`, so the existing
+      approval gate and argument hash apply unchanged
+- [x] Reply threads correctly (In-Reply-To / References, no double "Re:")
+- [x] Settings + `.env.example`; the app password never reaches logs, audit,
+      `redacted()` or error text
+- [x] No delete, label or settings tool exposed — asserted by a test
+- [x] Dedicated email skill, with English, Hindi and Bengali triggers
+- [x] Untrusted-content wrapper around every fetched body and subject
+- [x] 40 tests, mutation-checked against: downgrading send to reversible,
+      fetching without PEEK, reporting a refused recipient as sent, dropping
+      the untrusted wrapper, and echoing the credential in an error
+- [ ] **Taint rule** — still the real control gap. Today an email body cannot
+      cause a send without a fresh approval only because *every* send needs
+      one. A scheduled task with a pre-authorised send hash is safe because
+      its arguments are frozen, but nothing yet marks a run as tainted.
+      - Acceptance: a tainted run refuses `external_side_effect` even when a
+        pre-authorised hash exists; unattended tainted runs deny outright
+      - Also hardens `get_recent_sms` and `get_notifications`
+- [ ] Inbox summary as a scheduled task, verified end to end on-device
+- [ ] On-device verification with a real mailbox (never yet run against Gmail)
 
 ## Phase 9 — App-level automation `[ ]` (next after Gmail, not yet specified)
 

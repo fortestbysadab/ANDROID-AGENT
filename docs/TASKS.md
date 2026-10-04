@@ -190,7 +190,13 @@ dedicated mailbox, app password over OAuth, bodies may reach the model.
 - [ ] Inbox summary as a scheduled task, verified end to end on-device
 - [ ] On-device verification with a real mailbox (never yet run against Gmail)
 
-## Phase 9 — App-level automation `[ ]`
+## Phase 9 — App-level automation `[ ]` DEFERRED (owner, 2026-10-04)
+
+**Deferred at the owner's request**, to avoid building an Android APK.
+Recorded for accuracy: **stage 1 needs no APK** — `uiautomator dump` runs
+over the wireless ADB already in use. Only stage 2 requires an installed
+app. If this is picked up again, stage 1 is unblocked and needs no new
+permission.
 
 Owner chose structured perception (accessibility-style). Staged after
 research: stage 1 gets the same node tree through existing ADB; stage 2 adds

@@ -202,7 +202,13 @@ Multilingual support is **not started** despite being a stated goal.
 - **Summarising sends email bodies to the cloud model.** That is a privacy
   decision for the owner, tracked as PRD Open Question 7, not an assumption.
 
-## Planned: app-level automation (decided 2026-10-04)
+## Deferred: app-level automation (owner, 2026-10-04)
+
+Deferred to avoid building an APK. Note for whoever revisits this: that
+applies only to stage 2. Stage 1 (`uiautomator dump` over existing ADB)
+needs no APK, no new permission and no new dependency.
+
+## Planned shape, if it is picked up again
 
 - The owner chose structured screen perception over screenshots and a vision
   model. Correct call: a vision model would be slower, cost tokens per step,

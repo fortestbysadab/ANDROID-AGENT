@@ -15,16 +15,9 @@ import os
 import secrets
 import sys
 
-from android_agent.agent.runtime import AgentRuntime
-from android_agent.agent.session import SqliteSessionStore
-from android_agent.approvals.store import InMemoryApprovalStore
+from android_agent.app import build_application
 from android_agent.config import Settings
-from android_agent.models.openai_compatible import OpenAICompatiblePlanner
-from android_agent.observability.audit import JsonlAuditSink
 from android_agent.observability.logging import configure_logging
-from android_agent.policy.engine import DefaultPolicy
-from android_agent.skills.loader import SkillRouter
-from android_agent.tools.catalog import build_full_registry
 from android_agent.tools.media import media_root, storage_advice
 from android_agent.web.archive import ChatArchive
 from android_agent.web.security import AuthManager, WebConfigError, validate_token
@@ -61,67 +54,45 @@ def main() -> int:
 
     host = os.environ.get("ANDROID_AGENT_WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.environ.get("ANDROID_AGENT_WEB_PORT", "8765"))
-
     if host not in {"127.0.0.1", "localhost", "::1"}:
         logger.warning(
             "Binding to %s exposes the UI on your local network directly. "
-            "Prefer 127.0.0.1 with a Cloudflare tunnel in front.",
-            host,
+            "Prefer 127.0.0.1 with a Cloudflare tunnel in front.", host
         )
 
-    state_dir = os.path.expanduser(settings.state_dir)
-    runtime = AgentRuntime(
-        planner=OpenAICompatiblePlanner(
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            dialect=settings.llm_dialect,
-            timeout_seconds=settings.request_timeout_seconds,
-        ),
-        registry=build_full_registry(),
-        policy=DefaultPolicy(str(settings.owner_chat_id)),
-        system_prompt=SYSTEM_PROMPT,
-        audit=JsonlAuditSink(os.path.join(state_dir, "audit.jsonl")),
-        skill_router=SkillRouter.bundled(),
-    )
+    # The same composition root the bot and the scheduler use, so the three
+    # front ends cannot drift apart on tools, policy or authorisation.
+    application = build_application(settings, system_prompt=SYSTEM_PROMPT)
+    archive = ChatArchive(os.path.join(application.state_dir, "web_chats.db"))
 
     app = WebApp(
-        runtime=runtime,
-        approvals=InMemoryApprovalStore(ttl_seconds=300),
-        sessions=SqliteSessionStore(
-            os.path.join(state_dir, "sessions.db"),
-            ttl_seconds=settings.session_ttl_seconds,
-            max_messages=settings.session_max_messages,
-        ),
-        archive=ChatArchive(os.path.join(state_dir, "web_chats.db")),
+        runtime=application.runtime,
+        approvals=application.approvals,
+        sessions=application.sessions,
+        archive=archive,
         auth=AuthManager(token),
         owner_id=settings.owner_chat_id,
         session_ttl_seconds=settings.session_ttl_seconds,
+        documents=application.document_store,
+        schedule_store=application.schedule_store,
     )
 
-    server = make_server(app, host, port)
     advice = storage_advice()
-
-    print("\n  Android Agent web console")
-    print(f"  Local URL : http://{host}:{port}")
-    print(f"  Model     : {settings.llm_model}")
-    print(f"  Tools     : {len(runtime.registry)}")
-    print(f"  Media     : {media_root()}")
     if advice:
-        print(f"  Warning   : {advice}")
-    print("\n  Expose it with:")
-    print(f"      cloudflared tunnel --url http://localhost:{port}")
-    print("\n  Anyone with the tunnel URL AND the token controls this phone.")
-    print("  Press Ctrl+C to stop.\n")
+        logger.warning(advice)
+    logger.info("Media is saved to %s", media_root())
 
+    server = make_server(app, host=host, port=port)
+    logger.info("Web console on http://%s:%d", host, port)
+    logger.info("Expose it with: cloudflared tunnel --url http://localhost:%d", port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        logger.info("Stopping")
     finally:
-        server.shutdown()
-        app.sessions.close()
-        app.archive.close()
+        server.server_close()
+        archive.close()
+        application.close()
     return 0
 
 

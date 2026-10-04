@@ -9,10 +9,12 @@ that called the handler methods directly.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -623,6 +625,91 @@ class LocationArtifactTests(WebTestCase):
         self.assertEqual(artifacts[0]["name"], "22.36464, 87.99950")
 
 
+class ScreenDataTests(WebTestCase):
+    """The Files, Tools and Schedule screens read from these."""
+
+    def setUp(self):
+        super().setUp()
+        self.client.login()
+
+    def test_tools_are_listed_with_risk_and_description(self):
+        status, payload = self.client.request("GET", "/api/tools")
+        self.assertEqual(status, 200)
+        tools = payload["tools"]
+        self.assertTrue(tools)
+        first = tools[0]
+        for field in ("name", "risk", "description", "untrusted"):
+            with self.subTest(field=field):
+                self.assertIn(field, first)
+
+    def test_tools_are_sorted_so_the_list_is_stable(self):
+        _, payload = self.client.request("GET", "/api/tools")
+        names = [tool["name"] for tool in payload["tools"]]
+        self.assertEqual(names, sorted(names))
+
+    def test_files_lists_the_folder_not_only_known_documents(self):
+        """Files the owner dropped in by hand must be visible too."""
+        folder = Path(self.tmp.name) / "files"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "by-hand.txt").write_text("hello", encoding="utf-8")
+        with mock.patch(
+            "android_agent.documents.store.documents_root", return_value=folder
+        ):
+            status, payload = self.client.request("GET", "/api/files")
+        self.assertEqual(status, 200)
+        self.assertEqual([f["name"] for f in payload["files"]], ["by-hand.txt"])
+        self.assertEqual(payload["files"][0]["size"], 5)
+
+    def test_files_is_empty_rather_than_failing_with_no_folder(self):
+        missing = Path(self.tmp.name) / "nope"
+        with mock.patch(
+            "android_agent.documents.store.documents_root", return_value=missing
+        ):
+            status, payload = self.client.request("GET", "/api/files")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["files"], [])
+
+    def test_schedule_is_empty_without_a_store(self):
+        status, payload = self.client.request("GET", "/api/schedule")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["tasks"], [])
+
+    def test_the_screen_endpoints_need_authentication(self):
+        self.client.request("POST", "/api/logout")
+        for path in ("/api/files", "/api/tools", "/api/schedule"):
+            with self.subTest(path=path):
+                status, _ = self.client.request("GET", path)
+                self.assertEqual(status, 401)
+
+    def test_a_file_can_be_downloaded_by_name(self):
+        folder = Path(self.tmp.name) / "files"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "report.txt").write_bytes(b"content here")
+        with mock.patch(
+            "android_agent.documents.store.documents_root", return_value=folder
+        ):
+            status, payload = self.client.request(
+                "GET", "/api/files/download?name=report.txt", csrf=False
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["_raw"], b"content here")
+
+    def test_a_download_cannot_escape_the_files_folder(self):
+        folder = Path(self.tmp.name) / "files"
+        folder.mkdir(parents=True, exist_ok=True)
+        with mock.patch(
+            "android_agent.documents.store.documents_root", return_value=folder
+        ):
+            for attempt in ("../secret", "/etc/passwd", "..%2Fsecret"):
+                with self.subTest(attempt=attempt):
+                    status, _ = self.client.request(
+                        "GET",
+                        f"/api/files/download?name={urllib.parse.quote(attempt)}",
+                        csrf=False,
+                    )
+                    self.assertIn(status, (400, 403, 404))
+
+
 class StaticTests(WebTestCase):
     def test_ui_is_served_without_a_session(self):
         status, payload = self.client.request("GET", "/", csrf=False)
@@ -658,15 +745,17 @@ class StaticTests(WebTestCase):
 
         A map embedded in the markup would make every page load call Google,
         and would leave a broken frame on a phone with no connection. It is
-        therefore created in a click handler instead.
+        therefore created only after a click. Asserted as a property of the
+        delivered document rather than of any one implementation, since the
+        console has been both hand-written and React.
         """
         html = UI_PATH.read_text(encoding="utf-8")
         self.assertIn("maps.google.com", html, "the map affordance is missing")
         self.assertNotRegex(
-            html, r"src=\"https://maps", "the map must not load on page open"
+            html, r"src=\s*[\"']https://maps", "the map must not load on page open"
         )
-        self.assertNotIn("<iframe", html, "no iframe may exist before the click")
-        self.assertIn("data-showmap", html)
+        self.assertNotIn("<iframe", html, "no iframe may exist in the markup")
+        self.assertIn("Show map", html, "there must be something to click")
 
     def test_coordinates_still_show_without_the_map(self):
         """Offline, the card must still answer 'where am I'."""
@@ -675,11 +764,27 @@ class StaticTests(WebTestCase):
         self.assertRegex(html, r"toFixed\(5\)")
 
     def test_ui_ships_both_themes(self):
+        """Light and dark authored separately, plus an explicit override."""
         html = UI_PATH.read_text(encoding="utf-8")
-        self.assertIn("prefers-color-scheme: dark", html)
-        self.assertIn('data-theme="dark"', html)
+        self.assertRegex(html, r"prefers-color-scheme:\s*dark")
+        self.assertRegex(html, r"\[data-theme=[\"']?dark")
         self.assertIn("prefers-reduced-motion", html)
-        self.assertIn("color-scheme: light dark", html)
+        self.assertRegex(html, r"color-scheme:\s*light dark")
+
+    def test_the_theme_is_applied_before_first_paint(self):
+        """Otherwise a dark-mode user gets a white flash on every load."""
+        html = UI_PATH.read_text(encoding="utf-8")
+        head = html.split("<div id=\"root\">")[0]
+        self.assertIn("aa-theme", head)
+
+    def test_the_ui_renders_content_as_data_not_markup(self):
+        """Model output and message bodies must never become HTML."""
+        # Matches use, not mention: a comment saying the app avoids this
+        # should not fail the check that it avoids it.
+        usage = re.compile(r"dangerouslySetInnerHTML\s*[=:]")
+        for path in Path("web-ui/src").glob("*.jsx"):
+            with self.subTest(file=path.name):
+                self.assertNotRegex(path.read_text("utf-8"), usage)
 
     def test_unknown_get_path_returns_404(self):
         status, _ = self.client.request("GET", "/secret", csrf=False)

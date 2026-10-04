@@ -13,3 +13,7 @@ env/
 .vscode/
 .idea/
 .DS_Store
+
+# Web console build artefacts (ui.html itself is committed on purpose)
+web-ui/node_modules/
+web-ui/dist/

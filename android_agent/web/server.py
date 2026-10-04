@@ -57,6 +57,8 @@ class WebApp:
         owner_id: int,
         session_ttl_seconds: float,
         session_key: int | None = None,
+        documents=None,
+        schedule_store=None,
     ) -> None:
         self.runtime = runtime
         self.approvals = approvals
@@ -65,6 +67,9 @@ class WebApp:
         self.auth = auth
         self.owner_id = owner_id
         self.session_ttl_seconds = session_ttl_seconds
+        # Optional read-only views. Absent in tests that only exercise chat.
+        self.documents = documents
+        self.schedule_store = schedule_store
         # Keep the web conversation separate from the Telegram one so the two
         # front ends do not interleave into a single history.
         self.session_key = session_key if session_key is not None else -abs(owner_id)
@@ -205,6 +210,33 @@ class Handler(BaseHTTPRequestHandler):
     def _authenticated(self) -> bool:
         return self.app.auth.valid_session(self._session_id())
 
+    def _serve_document(self, name: str) -> None:
+        """Serve one file from the files folder, by name only."""
+        from android_agent.documents.store import documents_root
+
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Bad file name."})
+            return
+        root = documents_root().resolve()
+        candidate = (root / name).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            self._json(HTTPStatus.FORBIDDEN, {"error": "Outside the files folder."})
+            return
+        if not candidate.is_file():
+            self._json(HTTPStatus.NOT_FOUND, {"error": "No such file."})
+            return
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        self._send(
+            HTTPStatus.OK, candidate.read_bytes(), content_type,
+            {
+                "Content-Disposition": f'inline; filename="{candidate.name}"',
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, max-age=60",
+            },
+        )
+
     def _require_media_auth(self) -> bool:
         """Auth + rate limit, without the custom-header requirement."""
         if not self.app.auth.allow_request(self.client_identity()):
@@ -261,6 +293,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"items": self._media_index(), "root": str(media_root())})
             return
 
+        if path == "/api/files/download":
+            if not self._require_media_auth():
+                return
+            self._serve_document(parse_qs(route.query).get("name", [""])[0])
+            return
         if path == "/api/media/file":
             # Deliberately exempt from the custom-header check: this URL is
             # opened as a top-level navigation (tapping a photo opens a tab)
@@ -272,6 +309,21 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_media(parse_qs(route.query).get("name", [""])[0])
             return
 
+        if path == "/api/files":
+            if not self._require_api_auth():
+                return
+            self._json(HTTPStatus.OK, {"files": self._files()})
+            return
+        if path == "/api/tools":
+            if not self._require_api_auth():
+                return
+            self._json(HTTPStatus.OK, {"tools": self._tools()})
+            return
+        if path == "/api/schedule":
+            if not self._require_api_auth():
+                return
+            self._json(HTTPStatus.OK, {"tasks": self._tasks()})
+            return
         if path == "/api/ping":
             self._json(HTTPStatus.OK, {"ok": True, "authenticated": self._authenticated()})
             return
@@ -455,6 +507,64 @@ class Handler(BaseHTTPRequestHandler):
                     entry["resolved"] = outcome
 
     # -- helpers ------------------------------------------------------
+
+    def _files(self) -> list[dict[str, object]]:
+        """Everything in the files folder, newest first.
+
+        Lists the folder itself rather than only the document store, so files
+        the owner put there by hand are visible too - the screen is meant to
+        answer "what is in my files folder", not "what did you record".
+        """
+        from android_agent.documents.store import documents_root
+
+        known = {}
+        if self.app.documents is not None:
+            for document in self.app.documents.recent():
+                known[Path(document.path).name] = document
+
+        entries: list[dict[str, object]] = []
+        try:
+            paths = sorted(
+                (p for p in documents_root().iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return []
+        for path in paths:
+            stat = path.stat()
+            document = known.get(path.name)
+            entries.append({
+                "name": path.name,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "format": path.suffix.lstrip(".").lower(),
+                "title": document.title if document else path.stem,
+                "version": document.version if document else None,
+                "id": document.document_id if document else None,
+                "has_script": bool(document),
+            })
+        return entries
+
+    def _tools(self) -> list[dict[str, object]]:
+        registry = self.app.runtime.registry
+        tools = []
+        for schema in registry.model_schemas():
+            name = schema["function"]["name"]
+            spec = registry.get(name)
+            tools.append({
+                "name": name,
+                "risk": spec.risk.value,
+                "description": spec.description,
+                "idempotent": spec.idempotent,
+                "untrusted": spec.returns_untrusted_content,
+            })
+        return sorted(tools, key=lambda item: item["name"])
+
+    def _tasks(self) -> list[dict[str, object]]:
+        if self.app.schedule_store is None:
+            return []
+        return [task.as_dict() for task in self.app.schedule_store.all_tasks()]
 
     def _artifacts(self, results) -> list[dict[str, object]]:
         artifacts = []

@@ -157,6 +157,32 @@ configuration, and externalising the ~72 deterministic tool strings.
 - [ ] On-device smoke checklist (what to verify manually after a release)
 - [ ] Soak test: scheduler running for 24 h with the phone idle
 
+## Phase 10 — Documents `[-]`
+
+Model, set by the owner: **a document is its source, not its bytes.** PDFs
+cannot be edited, so a revision re-renders from stored Markdown and produces
+a new numbered version; the earlier file stays.
+
+- [x] `documents/render.py` — Markdown subset → md, txt, html, pdf; rows →
+      csv, json, xlsx; slides → pptx. Backends optional, each naming its
+      install command when missing.
+- [x] `documents/store.py` — source, version and path per document, in
+      `documents.db`; files in `<media root>/files`
+- [x] Four tools: create, revise, list, read
+- [x] `read_document` returns untrusted content and taints the run — a PDF
+      someone sent can contain text aimed at the agent
+- [x] Path containment: a name is not a path; reads stay in the files folder
+- [x] Non-ASCII titles keep their own script in filenames rather than being
+      transliterated
+- [x] Documents skill, with English, Hindi and Bengali triggers
+- [x] 43 tests, mutation-checked against overwriting v1, escaping the files
+      folder, dropping HTML escaping, and not declaring untrusted output
+- [ ] Verify PDF output on-device (reportlab is installed there, absent in
+      the sandbox, so the reportlab path is untested)
+- [ ] PPTX: needs `pkg install python-lxml python-pillow` then
+      `pip install python-pptx`
+- [ ] `pypdf` for reading PDFs (`pip install pypdf`)
+
 ## Phase 8 — Channel connectors: Gmail `[-]`
 
 Design in ARCHITECTURE.md § Email connector. Decisions taken 2026-10-04:

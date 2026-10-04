@@ -23,6 +23,7 @@ from android_agent.agent.session import SqliteSessionStore
 from android_agent.approvals.store import InMemoryApprovalStore
 from android_agent.channels import GmailChannel
 from android_agent.config import Settings
+from android_agent.documents import DocumentStore
 from android_agent.models.openai_compatible import OpenAICompatiblePlanner
 from android_agent.observability.audit import AuditSink, JsonlAuditSink
 from android_agent.policy.engine import DefaultPolicy, PolicyDecision, UnattendedPolicy
@@ -55,6 +56,7 @@ class Application:
     approvals: InMemoryApprovalStore
     schedule_store: ScheduleStore
     schedule_runner: ScheduleRunner
+    document_store: DocumentStore
     audit: AuditSink
     email_channel: Any | None = None
 
@@ -63,7 +65,7 @@ class Application:
         return os.path.expanduser(self.settings.state_dir)
 
     def close(self) -> None:
-        for resource in (self.sessions, self.schedule_store):
+        for resource in (self.sessions, self.schedule_store, self.document_store):
             try:
                 resource.close()
             except Exception:
@@ -127,10 +129,13 @@ def build_application(
         )
         logger.info("Email connector enabled for %s", settings.email_address)
 
+    document_store = DocumentStore(os.path.join(state_dir, "documents.db"))
+
     registry = build_full_registry(
         schedule_store,
         needs_authorisation=needs_authorisation,
         email_channel=email_channel,
+        document_store=document_store,
     )
 
     if planner is None:
@@ -180,6 +185,7 @@ def build_application(
         approvals=InMemoryApprovalStore(ttl_seconds=300),
         schedule_store=schedule_store,
         schedule_runner=schedule_runner,
+        document_store=document_store,
         audit=audit,
         email_channel=email_channel,
     )

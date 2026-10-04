@@ -10,7 +10,8 @@ from .termux_extra import extra_termux_tools
 
 
 def build_full_registry(
-    schedule_store=None, *, needs_authorisation=None, email_channel=None
+    schedule_store=None, *, needs_authorisation=None, email_channel=None,
+    document_store=None,
 ) -> ToolRegistry:
     """Build the catalogue.
 
@@ -35,5 +36,10 @@ def build_full_registry(
         from .email_tools import email_tools
 
         for tool in email_tools(email_channel):
+            registry.register(tool)
+    if document_store is not None:
+        from .document_tools import document_tools
+
+        for tool in document_tools(document_store):
             registry.register(tool)
     return registry

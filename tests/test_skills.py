@@ -30,6 +30,7 @@ class SkillRouterTests(unittest.TestCase):
                 "communications",
                 "sensitive-data",
                 "email",
+                "documents",
             },
         )
 
@@ -44,6 +45,20 @@ class SkillRouterTests(unittest.TestCase):
         for request in ("summarise my inbox", "मेरा ईमेल पढ़ो", "আমার ইনবক্স দেখাও"):
             with self.subTest(request=request):
                 self.assertIn("Skill: email", router.instructions_for(request))
+
+    def test_the_documents_skill_states_the_source_model(self):
+        """The rule the owner specified: regenerate, never patch bytes."""
+        guidance = SkillRouter.bundled().instructions_for("make me a pdf report")
+        lowered = guidance.lower()
+        self.assertIn("skill: documents", lowered)
+        self.assertRegex(lowered, r"never try to patch")
+        self.assertRegex(lowered, r"full corrected source")
+
+    def test_the_documents_skill_loads_for_non_english_requests(self):
+        router = SkillRouter.bundled()
+        for request in ("make me a pdf report", "একটা রিপোর্ট বানাও", "मुझे फाइल बनाओ"):
+            with self.subTest(request=request):
+                self.assertIn("Skill: documents", router.instructions_for(request))
 
     def test_the_email_skill_says_message_content_is_untrusted(self):
         guidance = SkillRouter.bundled().instructions_for("read my email").lower()

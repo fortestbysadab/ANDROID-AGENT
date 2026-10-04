@@ -123,8 +123,19 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
         workspace = workspace_for(document_id)
         result = run_script(script, workspace)
         if not result.ok:
+            if result.sandbox_failed:
+                return None, ToolResult.error(
+                    "NO FILE WAS CREATED. The isolation layer could not start, "
+                    "so the script never ran. Tell the owner exactly this and "
+                    "that `python -m android_agent doctor` will diagnose it. "
+                    f"Do not claim the document exists.\n\n{result.diagnostic}",
+                    code="sandbox_unavailable",
+                )
             return None, ToolResult.error(
-                f"The script failed, so no file was written.\n\n{result.diagnostic}",
+                "NO FILE WAS CREATED. The script raised an error. Fix the "
+                "script and call this tool again; if it fails twice, tell the "
+                "owner what went wrong. Do not describe the document as if it "
+                f"exists.\n\n{result.diagnostic}",
                 code="script_failed",
                 retryable=True,
             )
@@ -132,8 +143,9 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
         if produced is None:
             names = ", ".join(path.name for path in result.produced) or "nothing"
             return None, ToolResult.error(
-                f"The script ran but wrote no .{fmt} file (it produced {names}). "
-                f"Write the result to 'output.{fmt}' in the working directory.",
+                f"NO FILE WAS CREATED. The script ran but wrote no .{fmt} file "
+                f"(it produced {names}). Write the result to 'output.{fmt}' in "
+                "the working directory and call this tool again.",
                 code="no_output",
                 retryable=True,
             )

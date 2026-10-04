@@ -205,6 +205,37 @@ def check_termux() -> bool:
     return _line(STATUS_OK, "termux-api responds")
 
 
+def check_document_sandbox() -> bool:
+    """Actually run a script the way documents are generated.
+
+    A failure here otherwise reaches the owner only as the model's
+    paraphrase - "a local environment restriction" - which is unactionable.
+    This prints what really happened.
+    """
+    from android_agent.documents.sandbox import proot_available, self_test
+
+    isolated = proot_available()
+    if not isolated:
+        _line(
+            STATUS_WARN,
+            "proot is not installed, so generated scripts are NOT isolated",
+            "Install with: pkg install proot. Until then, every document "
+            "generation asks for approval and shows you the script first.",
+        )
+
+    result = self_test()
+    if result.ok:
+        detail = "isolated with proot" if result.isolated else "no isolation (no proot)"
+        return _line(STATUS_OK, f"document scripts run ({detail})")
+    if result.sandbox_failed:
+        return _line(
+            STATUS_FAIL,
+            "proot is installed but refused to run the script",
+            result.diagnostic,
+        )
+    return _line(STATUS_FAIL, "a document script could not run", result.diagnostic)
+
+
 def main() -> int:
     print("Android Agent v2 — preflight diagnostics\n")
     settings, ok = check_config()
@@ -220,6 +251,7 @@ def main() -> int:
         check_multi_turn(settings),
         check_media_storage(),
         check_termux(),
+        check_document_sandbox(),
     ]
     print()
     if all(results):

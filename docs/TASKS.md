@@ -181,6 +181,17 @@ as wrong, and the templates were deleted rather than left as dead code.
       totals, charts, margins — not just correct words
 - [x] 48 tests, mutation-checked against ungating without proot, an unscrubbed
       environment, not hiding home, and reporting failures as success
+- [x] `python -m android_agent doctor` runs a real script through the
+      sandbox and prints the actual failure, instead of the owner receiving
+      the model's paraphrase of an error it half understood
+- [x] Resource limits corrected: RLIMIT_NPROC removed (a per-user cap that
+      cannot bound the script and can stop it starting), address space raised
+      to 4 GB (virtual, not resident — reportlab and matplotlib reserve far
+      more than they use)
+- [x] A proot start-up failure is distinguished from a script bug: different
+      error code, not retryable, and it names the device setup
+- [x] Failure messages begin "NO FILE WAS CREATED" so the model cannot
+      summarise a failure as a prepared report
 - [ ] Verify on-device: proot isolation and a real reportlab PDF
 - [ ] Optional libraries the owner may want: `pip install pypdf matplotlib`
 

@@ -41,10 +41,15 @@ DEFAULT_TIMEOUT = 60.0
 #: A document script is not a long computation. These bound the damage a
 #: mistake can do without getting in the way of a real report with a chart.
 CPU_SECONDS = 50
-ADDRESS_SPACE_BYTES = 1024 * 1024 * 1024
+#: Address space, not resident memory. A 64-bit Python with reportlab or
+#: matplotlib reserves far more virtual space than it uses, so a tight cap
+#: here kills perfectly ordinary scripts. Generous on purpose.
+ADDRESS_SPACE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
-MAX_PROCESSES = 64
 MAX_CAPTURED_OUTPUT = 8000
+#: Deliberately no RLIMIT_NPROC: it is a *per-user* cap counting every
+#: process the owner already has, not a limit on this script's children.
+#: Setting it low cannot bound the script and can stop it starting at all.
 
 #: Paths hidden from the script. Everything the owner would mind losing.
 HIDDEN_PATHS = ("/sdcard", "/storage")
@@ -58,6 +63,9 @@ class ScriptResult:
     produced: list[Path] = field(default_factory=list)
     isolated: bool = False
     timed_out: bool = False
+    #: True when proot itself refused to start. Entirely different from a
+    #: script with a bug, and fixed by the owner rather than by the model.
+    sandbox_failed: bool = False
 
     @property
     def diagnostic(self) -> str:
@@ -70,6 +78,12 @@ class ScriptResult:
         if self.timed_out:
             return f"The script did not finish within {DEFAULT_TIMEOUT:.0f} seconds."
         tail = (self.stderr or self.stdout or "").strip()
+        if self.sandbox_failed:
+            return (
+                "The isolation layer (proot) could not start, so nothing was "
+                f"run. This is a device setup problem, not a mistake in the "
+                f"script:\n{tail[-800:]}"
+            )
         return tail[-1500:] if tail else "The script produced no output and no error."
 
 
@@ -111,10 +125,14 @@ def _apply_limits() -> None:
         (resource.RLIMIT_CPU, CPU_SECONDS),
         (resource.RLIMIT_AS, ADDRESS_SPACE_BYTES),
         (resource.RLIMIT_FSIZE, MAX_OUTPUT_BYTES),
-        (resource.RLIMIT_NPROC, MAX_PROCESSES),
     ):
         try:
-            resource.setrlimit(limit, (value, value))
+            soft, hard = resource.getrlimit(limit)
+            # Never raise an existing limit, and never exceed the hard cap.
+            ceiling = value if hard in (resource.RLIM_INFINITY, -1) else min(value, hard)
+            if soft not in (resource.RLIM_INFINITY, -1):
+                ceiling = min(ceiling, soft)
+            resource.setrlimit(limit, (ceiling, hard))
         except (ValueError, OSError):
             # A limit the platform will not accept is not worth aborting for;
             # the remaining layers still apply.
@@ -202,6 +220,12 @@ def run_script(
 
     stdout = completed.stdout.decode("utf-8", "replace")[:MAX_CAPTURED_OUTPUT]
     stderr = completed.stderr.decode("utf-8", "replace")[:MAX_CAPTURED_OUTPUT]
+    # proot announces its own failures on stderr and never reaches Python.
+    sandbox_failed = isolated and completed.returncode != 0 and (
+        "proot error" in stderr.lower() or "proot:" in stderr.lower()
+    )
+    if sandbox_failed:
+        logger.error("proot refused to start: %s", stderr.strip()[:400])
     produced = sorted(
         path
         for path in workspace.iterdir()
@@ -213,6 +237,26 @@ def run_script(
         stderr=stderr,
         produced=produced,
         isolated=isolated,
+        sandbox_failed=sandbox_failed,
+    )
+
+
+def self_test(*, isolate: bool | None = None) -> ScriptResult:
+    """Run a trivial script end to end, to find out what actually breaks.
+
+    Exists because a failure here reaches the owner as the model's vague
+    paraphrase of an error it half understood. This gives them the real one.
+    """
+    import tempfile
+
+    probe = Path(tempfile.mkdtemp(prefix="android-agent-selftest-"))
+    return run_script(
+        "from pathlib import Path\n"
+        "Path('output.txt').write_text('sandbox ok', encoding='utf-8')\n"
+        "print('sandbox ok')\n",
+        probe,
+        timeout=30.0,
+        isolate=isolate,
     )
 
 

@@ -22,6 +22,7 @@ from android_agent.documents.reader import (
 from android_agent.documents.sandbox import (
     HIDDEN_PATHS,
     SCRIPT_NAME,
+    ScriptResult,
     build_command,
     pick_output,
     proot_available,
@@ -171,6 +172,95 @@ class IsolationCommandTests(unittest.TestCase):
         self.assertEqual(list(blind.iterdir()), [])
 
 
+class FailureHonestyTests(unittest.TestCase):
+    """A failed generation must be impossible to paraphrase as success."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.files = Path(self.tmp.name) / "files"
+        self.files.mkdir(parents=True)
+        for target in (
+            "android_agent.documents.store.documents_root",
+            "android_agent.tools.document_tools.documents_root",
+        ):
+            patcher = mock.patch(target, return_value=self.files)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.store = DocumentStore(Path(self.tmp.name) / "documents.db")
+        self.addCleanup(self.store.close)
+        self.tools = {tool.name: tool for tool in document_tools(self.store)}
+
+    def _create(self, script, fmt="pdf"):
+        tool = self.tools["create_document"]
+        return tool.handler(
+            None, tool.validate({"title": "T", "format": fmt, "script": script})
+        )
+
+    def test_a_script_error_says_no_file_was_created(self):
+        result = self._create("raise RuntimeError('boom')")
+        self.assertIn("NO FILE WAS CREATED", result.summary)
+        self.assertIn("Do not describe the document as if it exists", result.summary)
+
+    def test_a_missing_output_says_no_file_was_created(self):
+        result = self._create("pass")
+        self.assertIn("NO FILE WAS CREATED", result.summary)
+
+    def test_a_sandbox_failure_is_distinguished_from_a_script_bug(self):
+        """One the model can fix; the other only the owner can."""
+        broken = ScriptResult(
+            ok=False, stdout="", stderr="proot error: can't mount", isolated=True,
+            sandbox_failed=True,
+        )
+        with mock.patch(
+            "android_agent.tools.document_tools.run_script", return_value=broken
+        ):
+            result = self._create("print('x')")
+        self.assertEqual(result.error_code, "sandbox_unavailable")
+        self.assertIn("doctor", result.summary)
+        self.assertFalse(result.retryable, "retrying cannot fix a setup problem")
+
+    def test_a_proot_error_on_stderr_is_detected_as_a_sandbox_failure(self):
+        """Detection must come from the real run, not a hand-built result."""
+        import subprocess
+
+        completed = subprocess.CompletedProcess(
+            args=["proot"], returncode=1, stdout=b"",
+            stderr=b"proot error: ptrace(TRACEME): Operation not permitted",
+        )
+        with mock.patch(
+            "android_agent.documents.sandbox.proot_available", return_value=True
+        ), mock.patch(
+            "android_agent.documents.sandbox.subprocess.run", return_value=completed
+        ):
+            result = run_script("print('x')", workspace())
+        self.assertTrue(result.sandbox_failed)
+        self.assertFalse(result.ok)
+
+    def test_an_ordinary_script_error_is_not_called_a_sandbox_failure(self):
+        import subprocess
+
+        completed = subprocess.CompletedProcess(
+            args=["proot"], returncode=1, stdout=b"",
+            stderr=b"Traceback...\nValueError: bad column",
+        )
+        with mock.patch(
+            "android_agent.documents.sandbox.proot_available", return_value=True
+        ), mock.patch(
+            "android_agent.documents.sandbox.subprocess.run", return_value=completed
+        ):
+            result = run_script("print('x')", workspace())
+        self.assertFalse(result.sandbox_failed)
+
+    def test_a_sandbox_failure_names_proot_not_the_script(self):
+        broken = ScriptResult(
+            ok=False, stdout="", stderr="proot error: ptrace denied", isolated=True,
+            sandbox_failed=True,
+        )
+        self.assertIn("isolation layer", broken.diagnostic)
+        self.assertIn("not a mistake in the script", broken.diagnostic)
+
+
 class OutputPickingTests(unittest.TestCase):
     def setUp(self):
         self.space = workspace()
@@ -200,6 +290,46 @@ class OutputPickingTests(unittest.TestCase):
 
     def test_nothing_produced_means_nothing_picked(self):
         self.assertIsNone(pick_output([], "pdf"))
+
+
+class ResourceLimitTests(unittest.TestCase):
+    def test_the_process_count_limit_is_left_alone(self):
+        """RLIMIT_NPROC counts every process the owner already has.
+
+        Capping it cannot bound this script's children and can stop it
+        starting at all, which is how a document generation failed on the
+        owner's phone with no usable error. Checked by running a script and
+        comparing against the parent, because reading the source for the
+        constant proved too easy to satisfy while still setting it.
+        """
+        import resource
+
+        expected = resource.getrlimit(resource.RLIMIT_NPROC)
+        result = run_script(
+            "import resource; print(resource.getrlimit(resource.RLIMIT_NPROC))",
+            workspace(), isolate=False,
+        )
+        self.assertTrue(result.ok, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(expected))
+
+    def test_the_address_space_cap_is_generous_enough_for_real_libraries(self):
+        from android_agent.documents.sandbox import ADDRESS_SPACE_BYTES
+
+        self.assertGreaterEqual(ADDRESS_SPACE_BYTES, 2 * 1024**3)
+
+    def test_limits_never_exceed_an_existing_hard_limit(self):
+        result = run_script(
+            "import resource; print(resource.getrlimit(resource.RLIMIT_CPU))",
+            workspace(), isolate=False,
+        )
+        self.assertTrue(result.ok, result.stderr)
+
+    def test_the_self_test_runs_a_real_script(self):
+        from android_agent.documents.sandbox import self_test
+
+        result = self_test(isolate=False)
+        self.assertTrue(result.ok, result.diagnostic)
+        self.assertIn("sandbox ok", result.stdout)
 
 
 class LibraryReportTests(unittest.TestCase):

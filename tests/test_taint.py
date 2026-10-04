@@ -91,6 +91,20 @@ class DeclarationTests(unittest.TestCase):
              "list_recent_email", "read_email"},
         )
 
+    def test_web_search_results_taint_the_run(self):
+        """A search result is a stranger's words, like an email body."""
+        from types import SimpleNamespace
+
+        from android_agent.tools.catalog import build_full_registry
+
+        settings = SimpleNamespace(
+            search_provider="brave", search_api_key="k", search_endpoint=""
+        )
+        registry = build_full_registry(search_settings=settings)
+        tool = registry.get("web_search")
+        self.assertIsNotNone(tool, "web_search should be registered")
+        self.assertTrue(tool.returns_untrusted_content)
+
     def test_device_state_tools_do_not_taint(self):
         from android_agent.tools.catalog import build_full_registry
 

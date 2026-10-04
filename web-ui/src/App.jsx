@@ -2,12 +2,16 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 import { FilesScreen, ScheduleScreen, ToolsScreen } from './screens.jsx';
 import { RichText, when } from './text.jsx';
+import {
+  ArrowUp, Chat as ChatIcon, Clock, Doc, Globe, Lock, Menu, Plus, Shield,
+  Tools as ToolsIcon,
+} from './icons.jsx';
 
 const SCREENS = [
-  { id: 'chat', label: 'Chat', icon: '💬' },
-  { id: 'files', label: 'Files', icon: '📄' },
-  { id: 'schedule', label: 'Schedule', icon: '⏰' },
-  { id: 'tools', label: 'Tools', icon: '🧰' },
+  { id: 'chat', label: 'Chat', Icon: ChatIcon },
+  { id: 'files', label: 'Files', Icon: Doc },
+  { id: 'schedule', label: 'Schedule', Icon: Clock },
+  { id: 'tools', label: 'Tools', Icon: ToolsIcon },
 ];
 const POLL_MS = 5000;
 
@@ -35,6 +39,7 @@ function Login({ onDone }) {
   return (
     <div className="login">
       <form onSubmit={submit}>
+        <div className="mark">A</div>
         <h1>Android Agent</h1>
         <p>Enter the access token from your .env file.</p>
         {error && <div className="error" role="alert">{error}</div>}
@@ -106,9 +111,9 @@ function Message({ message, onApprove }) {
   if (message.role === 'approval') {
     const args = Object.entries(message.arguments || {});
     return (
-      <div className="msg">
-        <div className="approval" style={{ inlineSize: '100%' }}>
-          <h3>⚠ Approval required: {message.text}</h3>
+      <div className="turn">
+        <div className="approval">
+          <h3><Shield /> Approval required — {message.text}</h3>
           {message.after_untrusted_content && (
             <div className="warnline">
               This followed message content written by someone else. Check it is
@@ -155,17 +160,39 @@ function Message({ message, onApprove }) {
     (artifact) => artifact.kind !== 'location'
   );
 
+  if (mine) {
+    return (
+      <div className="turn user">
+        <div className="body">
+          <div className="userbubble">{message.text}</div>
+          <div className="byline" style={{ marginBlock: '6px 0' }}>
+            <time>{when(message.at)}</time>
+          </div>
+        </div>
+        <div className="avatar me" aria-hidden="true">You</div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`msg ${mine ? 'user' : 'assistant'}`}>
-      <div>
-        {!mine && <div className="who">Agent</div>}
-        <div className="bubble">
-          {mine ? message.text : <RichText value={message.text} />}
+    <div className="turn">
+      <div className="avatar bot" aria-hidden="true">A</div>
+      <div className="body">
+        <div className="byline">
+          <b>Agent</b><time>{when(message.at)}</time>
+          {message.used_web_search && (
+            <span style={{ color: 'var(--accent)', display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+              <Globe width="12" height="12" /> Web search
+            </span>
+          )}
+        </div>
+        <div className="prose">
+          <RichText value={message.text} />
           {maps.map((artifact, index) => (
             <MapCard key={index} artifact={artifact} />
           ))}
           {others.length > 0 && (
-            <div className="row" style={{ marginBlockStart: 8 }}>
+            <div className="row" style={{ marginBlockStart: 10 }}>
               {others.map((artifact, index) => (
                 <a
                   key={index}
@@ -180,24 +207,23 @@ function Message({ message, onApprove }) {
             </div>
           )}
         </div>
-        <div className="stamp">{when(message.at)}</div>
       </div>
     </div>
   );
 }
 
-function Chat({ state, setState, notify }) {
+function Chat({ state, setState, notify, search, setSearch }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const threadRef = useRef(null);
-  const boxRef = useRef(null);
 
   useEffect(() => {
     const node = threadRef.current;
     if (!node) return;
     const parent = node.parentElement;
-    const atBottom =
-      parent.scrollHeight - parent.scrollTop - parent.clientHeight < 120;
+    // Only follow the conversation when the owner is already at the bottom;
+    // yanking the view while they are reading history is maddening.
+    const atBottom = parent.scrollHeight - parent.scrollTop - parent.clientHeight < 140;
     if (atBottom) parent.scrollTop = parent.scrollHeight;
   }, [state.messages]);
 
@@ -207,15 +233,12 @@ function Chat({ state, setState, notify }) {
     if (!text || busy) return;
     setDraft('');
     setBusy(true);
-    // Optimistic echo: the owner's own words should appear at once rather
-    // than after a round trip through the model.
     setState((prev) => ({
       ...prev,
       messages: [...(prev.messages || []), { role: 'user', text, at: Date.now() / 1000 }],
     }));
     try {
-      const result = await api.send(text);
-      setState(result.state);
+      setState((await api.send(text, search)).state);
     } catch (error) {
       notify(error.message);
     } finally {
@@ -234,42 +257,74 @@ function Chat({ state, setState, notify }) {
   const messages = state.messages || [];
   return (
     <>
-      <div className="screen chat">
+      <div className="screen chat scroll">
         <div className="thread" ref={threadRef}>
           {messages.length === 0 && (
             <p className="empty">
-              Ask for anything: “how much battery?”, “where am I?”, “summarise
-              my inbox”, “make a PDF report on October expenses”.
+              Ask for anything — “how much battery?”, “where am I?”,
+              “summarise my inbox”, “make a PDF report on October expenses”.
             </p>
           )}
           {messages.map((message, index) => (
             <Message key={index} message={message} onApprove={approve} />
           ))}
-          {busy && <div className="msg"><div className="who">Agent is working…</div></div>}
+          {busy && (
+            <div className="turn">
+              <div className="avatar bot" aria-hidden="true">A</div>
+              <div className="body working">
+                <span className="dots"><span /><span /><span /></span> Working…
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
       <div className="composer">
-        <form onSubmit={send}>
+        <form className="shell" onSubmit={send}>
+          <label htmlFor="composer" className="sr-only" style={{ position: 'absolute', left: -9999 }}>
+            Message the agent
+          </label>
           <textarea
-            ref={boxRef}
+            id="composer"
             rows={1}
             value={draft}
-            placeholder="Message the agent"
-            aria-label="Message the agent"
+            placeholder="Message the agent…"
             onChange={(event) => {
               setDraft(event.target.value);
               const box = event.target;
               box.style.height = 'auto';
-              box.style.height = `${Math.min(box.scrollHeight, 160)}px`;
+              box.style.height = `${Math.min(box.scrollHeight, 180)}px`;
             }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) send(event);
             }}
           />
-          <button className="send" type="submit" disabled={busy || !draft.trim()}>
-            ↑
-          </button>
+          <div className="shellfoot">
+            <button
+              type="button"
+              className="searchtoggle"
+              aria-pressed={search}
+              aria-label={search ? 'Disable web search' : 'Enable web search'}
+              onClick={() => setSearch(!search)}
+            >
+              <Globe />
+              <span>Web search</span>
+              {search && <span className="live" />}
+            </button>
+            <div className="row" style={{ gap: 12 }}>
+              <span className="hint">
+                {busy ? 'Working…' : 'Enter to send · Shift + Enter for a new line'}
+              </span>
+              <button className="send" type="submit" disabled={busy || !draft.trim()}>
+                <ArrowUp />
+              </button>
+            </div>
+          </div>
         </form>
+        <p className="privacy">
+          <Lock /> Everything stays on your phone. The agent can be wrong —
+          check anything that matters.
+        </p>
       </div>
     </>
   );
@@ -287,6 +342,7 @@ export default function App() {
   );
   const [toast, setToast] = useState('');
   const [drawer, setDrawer] = useState(false);
+  const [search, setSearch] = useState(false);
 
   const notify = useCallback((message) => {
     setToast(message);
@@ -337,21 +393,34 @@ export default function App() {
         <button className="scrim" aria-label="Close menu" onClick={() => setDrawer(false)} />
       )}
       <aside className={`side${drawer ? ' open' : ''}`}>
-        <div className="brand">
-          <span className={`dot${state.session?.active ? '' : ' off'}`} />
-          Android Agent
+        <div className="sidehead">
+          <span className="mark" aria-hidden="true">A</span>
+          <b>Android Agent</b>
         </div>
-        <nav className="nav">
-          {SCREENS.map((item) => (
+        <button
+          type="button"
+          className="newchat"
+          onClick={async () => {
+            try {
+              setState((await api.newChat()).state);
+              setScreen('chat');
+              setDrawer(false);
+            } catch (error) { notify(error.message); }
+          }}
+        >
+          <Plus /> New chat
+        </button>
+        <nav className="nav" aria-label="Sections">
+          {SCREENS.map(({ id, label, Icon }) => (
             <button
-              key={item.id}
+              key={id}
               type="button"
-              aria-current={screen === item.id ? 'page' : undefined}
-              onClick={() => { setScreen(item.id); setDrawer(false); }}
+              aria-current={screen === id ? 'page' : undefined}
+              onClick={() => { setScreen(id); setDrawer(false); }}
             >
-              <span aria-hidden="true">{item.icon}</span>
-              {item.label}
-              {item.id === 'tools' && state.tools ? (
+              <Icon />
+              {label}
+              {id === 'tools' && state.tools ? (
                 <span className="count">{state.tools}</span>
               ) : null}
             </button>
@@ -372,16 +441,7 @@ export default function App() {
           </div>
           <button
             type="button"
-            className="linkish"
-            onClick={async () => {
-              await api.newChat().then(({ state: next }) => setState(next)).catch(() => {});
-            }}
-          >
-            New conversation
-          </button>
-          <button
-            type="button"
-            className="linkish"
+            className="ghost"
             onClick={async () => {
               try { await api.logout(); } finally { setAuthed(false); }
             }}
@@ -399,20 +459,25 @@ export default function App() {
             aria-label="Menu"
             onClick={() => setDrawer(true)}
           >
-            ☰
+            <Menu />
           </button>
           <h1>{current.label}</h1>
-          {screen === 'chat' && (
-            <span className="pill">
-              {state.session?.active ? 'Remembering this conversation' : 'Fresh conversation'}
-            </span>
-          )}
+          <span className="status">
+            <span className={`dot${state.session?.active ? '' : ' off'}`} />
+            {state.session?.active ? 'Remembering this chat' : 'Fresh chat'}
+          </span>
         </header>
 
         {screen === 'chat' ? (
-          <Chat state={state} setState={setState} notify={notify} />
+          <Chat
+            state={state}
+            setState={setState}
+            notify={notify}
+            search={search}
+            setSearch={setSearch}
+          />
         ) : (
-          <div className="screen">
+          <div className="screen scroll">
             {screen === 'files' && <FilesScreen />}
             {screen === 'schedule' && <ScheduleScreen />}
             {screen === 'tools' && <ToolsScreen />}

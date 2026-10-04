@@ -64,6 +64,16 @@ class Settings:
     #: Sender name recipients see. Keep it recognisable as you *and* as
     #: automated, e.g. "Sadab (Android Agent)".
     email_display_name: str = "Android Agent"
+    #: Web search. Unset means the tool is not registered at all.
+    search_provider: str = ""
+    search_api_key: str = ""
+    search_endpoint: str = ""
+
+    @property
+    def search_enabled(self) -> bool:
+        if self.search_provider == "searxng":
+            return bool(self.search_endpoint)
+        return bool(self.search_provider and self.search_api_key)
 
     @property
     def email_enabled(self) -> bool:
@@ -200,6 +210,9 @@ class Settings:
             email_imap_port=_port("ANDROID_AGENT_EMAIL_IMAP_PORT", 993),
             email_smtp_host=(os.environ.get("ANDROID_AGENT_EMAIL_SMTP_HOST") or "smtp.gmail.com").strip(),
             email_smtp_port=_port("ANDROID_AGENT_EMAIL_SMTP_PORT", 465),
+            search_provider=(os.environ.get("ANDROID_AGENT_SEARCH_PROVIDER") or "").strip().lower(),
+            search_api_key=(os.environ.get("ANDROID_AGENT_SEARCH_API_KEY") or "").strip(),
+            search_endpoint=(os.environ.get("ANDROID_AGENT_SEARCH_ENDPOINT") or "").strip(),
             email_display_name=(
                 os.environ.get("ANDROID_AGENT_EMAIL_DISPLAY_NAME") or "Android Agent"
             ).strip(),
@@ -222,4 +235,6 @@ class Settings:
             "email_address": self.email_address or "absent",
             "email_app_password": "set" if self.email_app_password else "absent",
             "email_display_name": self.email_display_name,
+            "search_provider": self.search_provider or "absent",
+            "search_api_key": "set" if self.search_api_key else "absent",
         }

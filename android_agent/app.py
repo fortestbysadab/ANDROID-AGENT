@@ -136,7 +136,10 @@ def build_application(
         needs_authorisation=needs_authorisation,
         email_channel=email_channel,
         document_store=document_store,
+        search_settings=settings if settings.search_enabled else None,
     )
+    if settings.search_enabled:
+        logger.info("Web search enabled via %s", settings.search_provider)
 
     if planner is None:
         planner = OpenAICompatiblePlanner(

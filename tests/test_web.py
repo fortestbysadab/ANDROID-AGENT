@@ -625,6 +625,44 @@ class LocationArtifactTests(WebTestCase):
         self.assertEqual(artifacts[0]["name"], "22.36464, 87.99950")
 
 
+class WebSearchToggleTests(WebTestCase):
+    """The composer toggle states intent; it does not force a tool call."""
+
+    planner_responses = (PlannerResponse(text="Here is what I found."),)
+
+    def setUp(self):
+        super().setUp()
+        self.client.login()
+
+    def _prompt_sent(self):
+        return self.planner.requests[0][-1]["content"]
+
+    def test_a_plain_message_is_passed_through_untouched(self):
+        self.client.request("POST", "/api/message", {"text": "hello there"})
+        self.assertEqual(self._prompt_sent(), "hello there")
+
+    def test_the_toggle_adds_an_instruction_to_search(self):
+        self.client.request(
+            "POST", "/api/message", {"text": "latest android news", "web_search": True}
+        )
+        prompt = self._prompt_sent()
+        self.assertIn("latest android news", prompt)
+        self.assertIn("web_search", prompt)
+        self.assertIn("cite", prompt.lower())
+
+    def test_the_transcript_records_what_the_owner_typed(self):
+        """Not the augmented prompt: the owner never wrote that."""
+        _, payload = self.client.request(
+            "POST", "/api/message", {"text": "weather today", "web_search": True}
+        )
+        said = [m for m in payload["state"]["messages"] if m["role"] == "user"]
+        self.assertEqual(said[-1]["text"], "weather today")
+
+    def test_the_toggle_defaults_to_off(self):
+        self.client.request("POST", "/api/message", {"text": "hello"})
+        self.assertNotIn("web search", self._prompt_sent().lower())
+
+
 class ScreenDataTests(WebTestCase):
     """The Files, Tools and Schedule screens read from these."""
 

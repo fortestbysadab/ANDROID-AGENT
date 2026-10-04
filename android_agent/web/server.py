@@ -409,7 +409,12 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _message(self):
-        text = str(self._body().get("text", "")).strip()
+        body = self._body()
+        text = str(body.get("text", "")).strip()
+        # The composer's Web search toggle. It expresses intent rather than
+        # forcing a call: the model still chooses, and the tool still passes
+        # through policy and taint like any other.
+        wants_search = bool(body.get("web_search"))
         if not text:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "Empty message."})
             return
@@ -423,8 +428,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.app.add_message("user", text)
             previous = self.app.sessions.active(self.app.session_key)
+            prompt = text
+            if wants_search:
+                prompt = (
+                    f"{text}\n\n[The owner turned web search on for this "
+                    "message. Use web_search and cite the links you used.]"
+                )
             outcome = self.app.runtime.run(
-                text,
+                prompt,
                 actor_id=str(self.app.owner_id),
                 chat_id=self.app.owner_id,
                 prior_messages=list(previous.messages) if previous else (),

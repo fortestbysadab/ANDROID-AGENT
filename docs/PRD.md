@@ -189,6 +189,40 @@ The stated product goal includes "works in any language". Today:
 
 See **TASKS.md Phase 4** and the Multilingual section in ARCHITECTURE.md.
 
+### 9. Channel connectors — Gmail first — **planned, not built**
+
+**Description.** Let the agent read, summarise and send email, so inbox
+triage becomes one of the repetitive tasks it handles. Gmail first; other
+channels only if a need appears.
+
+**Scope for v1**
+- Read recent mail (sender, subject, date, snippet or body).
+- Summarise the inbox, or a sender, or a time window.
+- Send a message, and reply in-thread.
+- Combine with scheduling: a morning inbox summary.
+
+**Explicitly out of scope for v1:** deleting mail, moving or labelling,
+attachments outbound, multiple accounts, calendar.
+
+**Requirements**
+- Reading mail is `sensitive_read`; sending is `external_side_effect` and so
+  is approval-gated with hash binding, like SMS and calls.
+- No delete capability is exposed, whatever the credential technically allows.
+- Email bodies are **untrusted input**. See the taint rule in
+  ARCHITECTURE.md § Untrusted content.
+- Headers and bodies in any language and encoding must round-trip correctly
+  (RFC 2047 encoded-words, non-UTF-8 charsets).
+
+**Acceptance criteria**
+- Sending requires a fresh approval showing the real recipient, subject and
+  body — never a paraphrase.
+- A scheduled summary cannot send mail, even if a send was pre-authorised in
+  the same task.
+- An email whose body contains instructions aimed at the agent cannot cause a
+  tool call to execute without owner approval.
+- A subject line in Hindi, Bengali or with emoji displays correctly.
+- The mailbox credential never appears in logs, audit or error text.
+
 ---
 
 ## User Flows
@@ -311,6 +345,19 @@ These are genuinely unresolved. They are **not** assumptions.
 5. **Durable approvals.** Pending approvals are lost on restart. Should an
    approval survive a restart (durable store), or is "ask again" correct?
 
+6. **Gmail auth: app password or OAuth?** Recommendation and trade-offs are
+   in ARCHITECTURE.md § Email connector. Short version: an app password needs
+   no Google verification and no new dependency, but grants full mailbox
+   access; OAuth can be scoped to read+send, but a personal project stuck in
+   "testing" gets refresh tokens that expire about weekly, which breaks
+   unattended use.
+7. **May email bodies be sent to the cloud model?** Summarising requires it.
+   This is the first feature that would send third-party content off-device.
+   Alternatives: metadata-only summaries (sender/subject/date, no body), or
+   accept it.
+8. **One mailbox or a dedicated one?** Pointing the agent at a secondary
+   Gmail that the main account forwards to would bound the blast radius of a
+   stolen credential.
 ## Assumptions
 
 Recorded so they can be challenged:

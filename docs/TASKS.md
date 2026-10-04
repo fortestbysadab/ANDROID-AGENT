@@ -153,6 +153,54 @@ Shape depends on **PRD Open Question 1**.
 - [ ] On-device smoke checklist (what to verify manually after a release)
 - [ ] Soak test: scheduler running for 24 h with the phone idle
 
+## Phase 8 — Channel connectors: Gmail `[ ]`
+
+Blocked on PRD Open Questions 6–8 (auth method, whether bodies may reach the
+cloud model, which mailbox). Design is in ARCHITECTURE.md § Email connector.
+
+- [ ] Decide auth: app password vs OAuth `[!]` blocked on Open Question 6
+- [ ] `channels/base.py` — Channel protocol (list / fetch / send)
+- [ ] `channels/gmail.py` — IMAP read + SMTP send, stdlib only
+      - Implementation notes: `imaplib`, `smtplib`, `email`; per-call
+        timeouts; bounded fetch count and body size; one retry on transient
+        failure
+      - Acceptance: a send is reported successful only if SMTP accepted it
+- [ ] Header and body decoding: RFC 2047 encoded-words, part charsets,
+      `text/plain` preferred, stdlib HTML strip
+      - Acceptance: Hindi, Bengali and emoji subjects round-trip correctly
+- [ ] `list_recent_email`, `read_email` — `sensitive_read`
+- [ ] `send_email`, `reply_to_email` — `external_side_effect`, approval+hash
+      - Acceptance: the approval prompt shows the real recipient, subject and
+        body, never a paraphrase
+- [ ] Settings + `.env.example`: address, app password, optional host/port
+      - Acceptance: the credential never appears in logs, audit or errors
+- [ ] **Taint rule** (prerequisite for safe summarising)
+      - Goal: once third-party content enters a run, external side effects
+        need a fresh approval; unattended tainted runs deny them
+      - Files: `agent/runtime.py`, `policy/engine.py`, `tools/base.py`
+      - Also hardens `get_recent_sms` and `get_notifications`, which have the
+        same exposure today
+      - Acceptance: an email body instructing the agent to send mail cannot
+        cause a send without a fresh owner approval
+- [ ] Untrusted-content delimiter around fetched bodies in the prompt
+- [ ] Inbox summary as a scheduled task, end to end
+- [ ] No delete / label / settings tool is exposed
+
+## Phase 9 — App-level automation `[ ]` (next after Gmail, not yet specified)
+
+Needs PRD Open Questions 3–4 answered first: which apps and workflows, and
+whether an accessibility service is acceptable. Today UI control is wireless
+ADB only (`tap_screen`, `swipe_screen`, `send_key_event`, `type_text`,
+`capture_screenshot`), which needs re-enabling after every reboot and cannot
+read structured screen content.
+
+- [ ] Specify 2–3 concrete target workflows with the owner
+- [ ] Decide on an accessibility service `[!]` blocked on Open Question 4
+- [ ] Decide how a screen is perceived: screenshot + vision model, or
+      accessibility node tree
+- [ ] Reliability design: UI automation is brittle; define how a step
+      verifies it worked before continuing
+
 ## Phase 7 — Release & Operations `[ ]`
 
 - [ ] First-run setup script: permissions checklist + verification
@@ -171,4 +219,7 @@ Shape depends on **PRD Open Question 1**.
    multilingual benefit, and measurable.
 4. **Verify the persisted job on hardware** — the scheduling story is
    unproven without it.
-5. **Event triggers** — once the latency trade-off is accepted.
+5. **Gmail connector** (Phase 8) — once Open Questions 6–8 are answered. The
+   taint rule should land with it, not after.
+6. **Event triggers** — once the latency trade-off is accepted.
+7. **App-level automation** (Phase 9) — needs target workflows named first.

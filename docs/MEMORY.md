@@ -181,6 +181,27 @@ Multilingual support is **not started** despite being a stated goal.
 
 ---
 
+## Planned: Gmail connector (decided 2026-10-04, not yet built)
+
+- **Recommendation: IMAP/SMTP with a Gmail app password**, not OAuth. Reasons:
+  zero new dependencies; no Google Cloud project or consent screen; and a
+  personal OAuth app left in "testing" receives refresh tokens that expire in
+  about a week, which would break unattended use. Plain-password access ended
+  1 May 2025; app passwords still work with 2-Step Verification.
+- **Known cost of that choice:** an app password grants the whole mailbox,
+  including delete, and cannot be scoped. Blast radius is therefore bounded
+  by the tool surface instead: no delete, label or settings tool will exist.
+- **Revisit if** Google announces removal of app passwords, or this is ever
+  distributed to anyone but its author.
+- **Email introduces prompt injection.** It is the first feature putting
+  third-party text into the planner's context. The planned mitigation is a
+  **taint rule**: once untrusted content enters a run, external side effects
+  need a fresh owner approval and unattended runs deny them outright. This
+  also covers `get_recent_sms` and `get_notifications`, which have the same
+  exposure today and no protection.
+- **Summarising sends email bodies to the cloud model.** That is a privacy
+  decision for the owner, tracked as PRD Open Question 7, not an assumption.
+
 ## External Integrations
 
 **Telegram Bot API.** Long polling via `pyTelegramBotAPI`; inline keyboards for

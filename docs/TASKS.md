@@ -96,6 +96,8 @@ is implemented **and** covered by passing tests.
       - Depends on: owner accepting the latency (see MEMORY.md § Open)
 - [ ] Verify on-device that a persisted job fires after a real reboot with
       Termux never opened. Script and docs exist; **not yet proven on hardware**
+- [x] Location card in the web console: coordinates, accuracy, Open in Maps,
+      and an embedded map loaded only on tap so the page stays offline-safe
 - [ ] Scheduler support in the web console UI (tools work there; no dedicated
       view)
 

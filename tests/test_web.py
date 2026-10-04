@@ -578,6 +578,51 @@ class MediaTests(WebTestCase):
         self.assertEqual(status, 401)
 
 
+class LocationArtifactTests(WebTestCase):
+    """Coordinates reach the UI as numbers, not only as a sentence."""
+
+    planner_responses = (PlannerResponse(text="Here you are."),)
+
+    def _artifacts(self, data):
+        handler = self.app  # WebApp owns no handler; use the helper directly
+        from android_agent.tools.base import ToolResult
+        from android_agent.web.server import Handler
+
+        return Handler._artifacts(handler, [ToolResult.ok("Location.", data)])
+
+    def test_a_location_result_carries_numeric_coordinates(self):
+        artifacts = self._artifacts({"latitude": 22.36464, "longitude": 87.9995})
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["kind"], "location")
+        self.assertAlmostEqual(artifacts[0]["latitude"], 22.36464)
+        self.assertAlmostEqual(artifacts[0]["longitude"], 87.9995)
+
+    def test_accuracy_is_included_when_known(self):
+        artifacts = self._artifacts(
+            {"latitude": 22.4, "longitude": 87.9, "accuracy": 8.0}
+        )
+        self.assertEqual(artifacts[0]["accuracy"], 8.0)
+
+    def test_a_coarse_fix_is_flagged_for_the_ui(self):
+        artifacts = self._artifacts(
+            {"latitude": 22.4, "longitude": 87.9, "accuracy": 800.0, "approximate": True}
+        )
+        self.assertTrue(artifacts[0]["approximate"])
+
+    def test_a_precise_fix_is_not_flagged(self):
+        artifacts = self._artifacts(
+            {"latitude": 22.4, "longitude": 87.9, "accuracy": 8.0, "approximate": False}
+        )
+        self.assertNotIn("approximate", artifacts[0])
+
+    def test_a_result_without_coordinates_produces_no_location_artifact(self):
+        self.assertEqual(self._artifacts({"percentage": 87}), [])
+
+    def test_the_human_readable_name_is_kept(self):
+        artifacts = self._artifacts({"latitude": 22.36464, "longitude": 87.9995})
+        self.assertEqual(artifacts[0]["name"], "22.36464, 87.99950")
+
+
 class StaticTests(WebTestCase):
     def test_ui_is_served_without_a_session(self):
         status, payload = self.client.request("GET", "/", csrf=False)
@@ -596,12 +641,38 @@ class StaticTests(WebTestCase):
         _, payload = self.client.request("GET", "/api/ping", csrf=False)
         self.assertTrue(payload["authenticated"])
 
-    def test_ui_is_self_contained(self):
-        """No CDN, no webfont, no tracker: the phone may be offline."""
+    def test_ui_loads_nothing_external(self):
+        """No CDN, no webfont, no tracker: the phone may be offline.
+
+        The map is the single deliberate exception and is *not* covered by
+        this test, because it is never fetched on load - see
+        test_the_map_is_only_fetched_when_the_owner_asks.
+        """
         html = UI_PATH.read_text(encoding="utf-8")
         for pattern in ("src=\"http", "href=\"http://", "cdn.", "googleapis", "unpkg"):
             with self.subTest(pattern=pattern):
                 self.assertNotIn(pattern, html)
+
+    def test_the_map_is_only_fetched_when_the_owner_asks(self):
+        """One external resource exists; it must stay opt-in.
+
+        A map embedded in the markup would make every page load call Google,
+        and would leave a broken frame on a phone with no connection. It is
+        therefore created in a click handler instead.
+        """
+        html = UI_PATH.read_text(encoding="utf-8")
+        self.assertIn("maps.google.com", html, "the map affordance is missing")
+        self.assertNotRegex(
+            html, r"src=\"https://maps", "the map must not load on page open"
+        )
+        self.assertNotIn("<iframe", html, "no iframe may exist before the click")
+        self.assertIn("data-showmap", html)
+
+    def test_coordinates_still_show_without_the_map(self):
+        """Offline, the card must still answer 'where am I'."""
+        html = UI_PATH.read_text(encoding="utf-8")
+        self.assertIn("Open in Maps", html)
+        self.assertRegex(html, r"toFixed\(5\)")
 
     def test_ui_ships_both_themes(self):
         html = UI_PATH.read_text(encoding="utf-8")

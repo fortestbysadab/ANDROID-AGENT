@@ -108,6 +108,17 @@ run **with timezone**, and for finished one-offs "done 2h ago" with no next
 run. Showing the timezone is a design requirement, not decoration: it is how a
 timezone fault becomes visible instead of silent.
 
+**Location card.** Two numbers are not an answer to "where am I". A location
+result renders coordinates, accuracy, an *Open in Maps* link (which hands off
+to the phone's real map app — better than an embedded frame on mobile) and a
+*Show map* button.
+
+The map is **loaded only on tap**. This is the single external resource in
+the console, and making it opt-in preserves the rule that the page works on
+an offline phone: before that tap, nothing has been requested from anyone but
+this server. A coarse fix also carries its warning here, not only in the
+prose.
+
 **Media drawer.** Grid of captured artifacts; tapping opens the file inline.
 
 **Toast.** Transient, polite, never the only channel for an error.

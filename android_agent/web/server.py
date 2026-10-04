@@ -456,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- helpers ------------------------------------------------------
 
-    def _artifacts(self, results) -> list[dict[str, str]]:
+    def _artifacts(self, results) -> list[dict[str, object]]:
         artifacts = []
         for result in results:
             name = result.data.get("artifact_name")
@@ -466,9 +466,20 @@ class Handler(BaseHTTPRequestHandler):
             latitude = result.data.get("latitude")
             longitude = result.data.get("longitude")
             if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
-                artifacts.append(
-                    {"kind": "location", "name": f"{latitude:.5f}, {longitude:.5f}"}
-                )
+                # Coordinates travel as numbers as well as text so the UI can
+                # offer a map without parsing a sentence back apart.
+                artifact = {
+                    "kind": "location",
+                    "name": f"{latitude:.5f}, {longitude:.5f}",
+                    "latitude": round(float(latitude), 6),
+                    "longitude": round(float(longitude), 6),
+                }
+                accuracy = result.data.get("accuracy")
+                if isinstance(accuracy, (int, float)):
+                    artifact["accuracy"] = round(float(accuracy), 1)
+                if result.data.get("approximate"):
+                    artifact["approximate"] = True
+                artifacts.append(artifact)
         return artifacts
 
     def _conversations(self) -> list[dict[str, Any]]:

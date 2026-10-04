@@ -341,6 +341,33 @@ li:hover .ci-del, .ci-del:focus-visible{ opacity:1; }
 .acts{ display:flex; gap:9px; margin-top:12px; }
 .acts button{ flex:1; min-height:var(--tap); border-radius:var(--radius-sm); font-weight:600; }
 .approve{ background:var(--ok); color:#fff; }
+
+/* Location card. The map itself is inserted on demand, so an offline phone
+   shows the coordinates and the Open in Maps link and nothing breaks. */
+.mapcard{
+  margin-block-start:10px; border:1px solid var(--border);
+  border-radius:12px; overflow:hidden; background:var(--surface-2);
+}
+.maphead{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:8px 12px; font-size:13px; flex-wrap:wrap;
+}
+.maphead a{ color:var(--accent); text-decoration:none; font-weight:600; }
+.maphead a:hover{ text-decoration:underline; }
+.mapcard .coarse{
+  padding:0 12px 8px; font-size:12px; color:var(--warn);
+}
+.showmap{
+  display:block; inline-size:100%; padding:10px 12px; min-block-size:44px;
+  border:0; border-block-start:1px solid var(--border);
+  background:transparent; color:var(--accent);
+  font:inherit; font-weight:600; cursor:pointer;
+}
+.showmap:hover{ background:var(--surface); }
+.mapframe{
+  display:block; inline-size:100%; block-size:260px; border:0;
+  border-block-start:1px solid var(--border);
+}
 .deny{ background:var(--surface); border:1px solid var(--line-strong); color:var(--text); }
 .deny:hover{ border-color:var(--danger); color:var(--danger); }
 .settled{
@@ -798,6 +825,26 @@ $('clearall').addEventListener('click', async () => {
 const SUGGESTIONS = ['How much battery is left?', 'What is my current location?',
                      'Take a photo with the back camera', 'Turn the torch on'];
 
+/* A location shown as two numbers is not an answer to "where am I".
+   The map loads only when asked: the page must still work on a phone with no
+   connection, so nothing external is fetched until the owner taps Show map. */
+function mapCard(a){
+  const lat = a.latitude, lng = a.longitude;
+  const label = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+  const accuracy = typeof a.accuracy === 'number'
+    ? ` · ±${a.accuracy >= 1000 ? (a.accuracy / 1000).toFixed(1) + ' km' : Math.round(a.accuracy) + ' m'}`
+    : '';
+  const coarse = a.approximate
+    ? '<div class="coarse">Approximate — this may be a long way out.</div>' : '';
+  return `<div class="mapcard" data-lat="${lat}" data-lng="${lng}">
+      <div class="maphead"><span>📍 ${esc(label)}${esc(accuracy)}</span>
+        <a href="https://www.google.com/maps/search/?api=1&query=${lat},${lng}"
+           target="_blank" rel="noopener noreferrer">Open in Maps</a></div>
+      ${coarse}
+      <button type="button" class="showmap" data-showmap="1">Show map</button>
+    </div>`;
+}
+
 function messageHtml(m){
   if (m.role === 'approval'){
     const args = Object.entries(m.arguments || {})
@@ -819,8 +866,11 @@ function messageHtml(m){
   }
 
   const mine = m.role === 'user';
+  const maps = (m.artifacts || [])
+    .filter(a => a.kind === 'location' && typeof a.latitude === 'number')
+    .map(mapCard).join('');
   const chips = (m.artifacts || []).map(a => {
-    if (a.kind === 'location') return `<span class="chip">📍 ${esc(a.name)}</span>`;
+    if (a.kind === 'location') return '';
     const icon = a.kind === 'photo' ? '🖼' : a.kind === 'screenshot' ? '🖥' : '🎙';
     return `<a class="chip" href="/api/media/file?name=${encodeURIComponent(a.name)}"
               target="_blank" rel="noopener noreferrer">${icon} ${esc(a.name)}</a>`;
@@ -835,7 +885,7 @@ function messageHtml(m){
       <div class="stack">
         ${mine ? '' : '<div class="who">Agent</div>'}
         <div class="bubble">${mine ? esc(m.text).replace(/\n/g, '<br>') : richText(m.text)}
-          ${chips ? `<div class="chips">${chips}</div>` : ''}</div>
+          ${maps}${chips ? `<div class="chips">${chips}</div>` : ''}</div>
         <div class="stamp">${esc(when(m.at))}</div>
       </div></div>`;
 }
@@ -891,6 +941,23 @@ function render(state){
 $('thread').addEventListener('click', async ev => {
   const suggest = ev.target.closest('[data-suggest]');
   if (suggest){ $('msg').value = suggest.dataset.suggest; $('msg').focus(); resize(); return; }
+
+  const showMap = ev.target.closest('[data-showmap]');
+  if (showMap){
+    /* Built here rather than in the markup on purpose: until this click,
+       the page has made no request to anyone but this server. */
+    const card = showMap.closest('.mapcard');
+    const lat = encodeURIComponent(card.dataset.lat);
+    const lng = encodeURIComponent(card.dataset.lng);
+    const frame = document.createElement('iframe');
+    frame.className = 'mapframe';
+    frame.loading = 'lazy';
+    frame.referrerPolicy = 'no-referrer';
+    frame.title = `Map of ${card.dataset.lat}, ${card.dataset.lng}`;
+    frame.src = `https://maps.google.com/maps?q=${lat},${lng}&z=16&output=embed`;
+    showMap.replaceWith(frame);
+    return;
+  }
 
   const button = ev.target.closest('[data-id]');
   if (!button) return;

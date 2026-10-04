@@ -64,8 +64,9 @@ class Settings:
     #: Sender name recipients see. Keep it recognisable as you *and* as
     #: automated, e.g. "Sadab (Android Agent)".
     email_display_name: str = "Android Agent"
-    #: Web search. Unset means the tool is not registered at all.
-    search_provider: str = ""
+    #: Web search. Tavily by default, so the owner only has to supply a key;
+    #: with no key the tool is not registered at all.
+    search_provider: str = "tavily"
     search_api_key: str = ""
     search_endpoint: str = ""
 
@@ -210,7 +211,9 @@ class Settings:
             email_imap_port=_port("ANDROID_AGENT_EMAIL_IMAP_PORT", 993),
             email_smtp_host=(os.environ.get("ANDROID_AGENT_EMAIL_SMTP_HOST") or "smtp.gmail.com").strip(),
             email_smtp_port=_port("ANDROID_AGENT_EMAIL_SMTP_PORT", 465),
-            search_provider=(os.environ.get("ANDROID_AGENT_SEARCH_PROVIDER") or "").strip().lower(),
+            search_provider=(
+                os.environ.get("ANDROID_AGENT_SEARCH_PROVIDER") or "tavily"
+            ).strip().lower(),
             search_api_key=(os.environ.get("ANDROID_AGENT_SEARCH_API_KEY") or "").strip(),
             search_endpoint=(os.environ.get("ANDROID_AGENT_SEARCH_ENDPOINT") or "").strip(),
             email_display_name=(

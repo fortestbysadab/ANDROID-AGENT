@@ -874,6 +874,34 @@ class StaticTests(WebTestCase):
         self.assertIn("prefers-reduced-motion", html)
         self.assertRegex(html, r"color-scheme:\s*light dark")
 
+    def test_the_console_adapts_to_real_device_sizes(self):
+        """Phone, small phone and landscape are each handled explicitly."""
+        html = UI_PATH.read_text(encoding="utf-8")
+        for breakpoint_ in ("900px", "560px"):
+            with self.subTest(breakpoint=breakpoint_):
+                self.assertIn(f"max-width:{breakpoint_}", html.replace(" ", ""))
+        self.assertIn("orientation:landscape", html.replace(" ", ""))
+
+    def test_focused_inputs_are_large_enough_not_to_zoom_ios(self):
+        """Safari zooms the page when a focused field is under 16px.
+
+        The result is the viewport jumping on every tap, which looks like a
+        broken layout rather than a font-size choice.
+        """
+        compact = UI_PATH.read_text(encoding="utf-8").replace(" ", "")
+        phone_rules = compact.split("@media(max-width:900px)")[1][:900]
+        self.assertIn("font-size:16px", phone_rules)
+
+    def test_the_layout_survives_mobile_browser_chrome(self):
+        """100% height leaves a gap under a collapsing address bar."""
+        self.assertIn("100dvh", UI_PATH.read_text(encoding="utf-8"))
+
+    def test_the_composer_clears_the_home_indicator(self):
+        self.assertIn("safe-area-inset-bottom", UI_PATH.read_text(encoding="utf-8"))
+
+    def test_touch_devices_do_not_rely_on_hover(self):
+        self.assertIn("hover:none", UI_PATH.read_text(encoding="utf-8").replace(" ", ""))
+
     def test_the_theme_is_applied_before_first_paint(self):
         """Otherwise a dark-mode user gets a white flash on every load."""
         html = UI_PATH.read_text(encoding="utf-8")

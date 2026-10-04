@@ -32,6 +32,36 @@ OPTIONAL_LIBRARIES = {
 }
 
 
+#: A generated PDF may be long, but not unbounded: a runaway loop producing
+#: thousands of pages fills the phone and is never what was asked for.
+MAX_PDF_PAGES = 50
+
+
+def count_pdf_pages(data: bytes) -> int | None:
+    """Pages in a PDF, or None when it cannot be determined.
+
+    Uses pypdf when installed. Without it, counts page objects directly -
+    crude, and blind to object streams, so it can undercount. It therefore
+    only ever reports a number it is confident about, and callers treat None
+    as "do not block".
+    """
+    try:
+        import io
+
+        from pypdf import PdfReader
+
+        return len(PdfReader(io.BytesIO(data)).pages)
+    except ImportError:
+        pass
+    except Exception:
+        return None
+    import re
+
+    # /Type /Page, not /Pages - the negative lookahead matters.
+    found = len(re.findall(rb"/Type\s*/Page(?![s])", data))
+    return found or None
+
+
 class ReadError(RuntimeError):
     def __init__(self, message: str, *, code: str = "read_failed"):
         super().__init__(message)

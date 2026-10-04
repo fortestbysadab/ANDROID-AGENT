@@ -23,7 +23,9 @@ from typing import Any
 
 from android_agent.documents.reader import (
     ALLOWED_FORMATS,
+    MAX_PDF_PAGES,
     ReadError,
+    count_pdf_pages,
     library_summary,
     read_file_text,
 )
@@ -149,6 +151,17 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
                 code="no_output",
                 retryable=True,
             )
+
+        if fmt == "pdf":
+            pages = count_pdf_pages(produced.read_bytes())
+            if pages is not None and pages > MAX_PDF_PAGES:
+                return None, ToolResult.error(
+                    f"NO FILE WAS KEPT. The script produced {pages} pages, over "
+                    f"the {MAX_PDF_PAGES}-page limit. Narrow the content or "
+                    "summarise it, then call this tool again.",
+                    code="too_many_pages",
+                    retryable=True,
+                )
 
         folder = documents_root()
         suffix = f"-v{version}" if version > 1 else ""
@@ -291,7 +304,10 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
             "XLSX, CSV, HTML, PNG chart, DOCX, PPTX and more. Use for any "
             "document, report, spreadsheet or chart. Design it properly — a "
             "report means headings, a table with totals and a chart where it "
-            "helps, not a wall of text. " + SCRIPT_GUIDE + library_summary() +
+            f"helps, not a wall of text. Use as many pages as the content "
+            f"needs, up to {MAX_PDF_PAGES}. Spreadsheets should be styled: "
+            "coloured header fills, borders, number formats, column widths. "
+            + SCRIPT_GUIDE + library_summary() +
             ". " + isolation_note,
             CREATE_SCHEMA,
             write_risk,

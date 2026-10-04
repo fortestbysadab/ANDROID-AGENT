@@ -10,6 +10,18 @@ The script runs in an empty private folder with no access to the phone's
 storage. Write the result to `output.<format>` in the working directory. The
 agent copies it into the owner's files folder afterwards.
 
+## Length
+
+Use as many pages as the content needs, up to **50**. One page is a correct
+answer only for a note or a single table. A report with sections, a data
+table and a chart is normally two to five pages; a detailed one is longer.
+Never pad to reach a length, and never compress a real report onto one page
+because it is easier to write.
+
+For reportlab, build a `story` list of flowables and let `SimpleDocTemplate`
+paginate. Use `PageBreak()` between major sections, `LongTable` for tables
+that span pages with `repeatRows=1`, and a page footer with the page number.
+
 ## Design the document, do not just dump text
 
 This is the part that matters. A report that is a title and three paragraphs
@@ -19,8 +31,14 @@ is a failure even if the words are correct.
   figures, a total row, and a chart when there is something to compare.
 - **Tables:** header row styled differently, aligned numbers, thousands
   separators, a visible total.
-- **Spreadsheets:** bold header, frozen top row, sensible column widths,
-  number formats for money and dates.
+- **Spreadsheets must be styled, not bare grids.** With openpyxl:
+  `PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")`
+  for the header with `Font(color="FFFFFF", bold=True)`; `Border`/`Side` for
+  rules; `number_format` such as `'#,##0.00'` for money and `'dd-mm-yyyy'`
+  for dates; `freeze_panes="A2"`; column widths from the longest value;
+  `Alignment(horizontal="right")` on numbers. Add banded row fills for long
+  tables, a bold total row, and a chart with `openpyxl.chart.BarChart` when
+  there is something to compare. A plain white grid is a failed spreadsheet.
 - **Charts:** label both axes, title the chart, no chartjunk. Save at a
   readable size.
 - Use real page margins and a readable body size. Default styling from a

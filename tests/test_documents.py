@@ -332,6 +332,85 @@ class ResourceLimitTests(unittest.TestCase):
         self.assertIn("sandbox ok", result.stdout)
 
 
+class PdfLengthTests(unittest.TestCase):
+    """Long is fine; unbounded is not."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.files = Path(self.tmp.name) / "files"
+        self.files.mkdir(parents=True)
+        for target in (
+            "android_agent.documents.store.documents_root",
+            "android_agent.tools.document_tools.documents_root",
+        ):
+            patcher = mock.patch(target, return_value=self.files)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.store = DocumentStore(Path(self.tmp.name) / "documents.db")
+        self.addCleanup(self.store.close)
+        self.tools = {tool.name: tool for tool in document_tools(self.store)}
+
+    def test_pages_are_counted_without_pypdf(self):
+        from android_agent.documents.reader import count_pdf_pages
+
+        pdf = b"%PDF-1.4\n" + b"<</Type /Page>>\n" * 7 + b"<</Type /Pages>>"
+        with mock.patch.dict("sys.modules", {"pypdf": None}):
+            self.assertEqual(count_pdf_pages(pdf), 7)
+
+    def test_the_pages_container_is_not_counted_as_a_page(self):
+        from android_agent.documents.reader import count_pdf_pages
+
+        with mock.patch.dict("sys.modules", {"pypdf": None}):
+            self.assertIsNone(count_pdf_pages(b"%PDF-1.4\n<</Type /Pages>>"))
+
+    def test_an_uncountable_pdf_does_not_block_the_document(self):
+        """Undercounting must never reject a legitimate file."""
+        from android_agent.documents.reader import count_pdf_pages
+
+        with mock.patch.dict("sys.modules", {"pypdf": None}):
+            self.assertIsNone(count_pdf_pages(b"not a pdf at all"))
+
+    def test_a_long_pdf_is_rejected_with_the_limit_named(self):
+        from android_agent.documents.reader import MAX_PDF_PAGES
+
+        tool = self.tools["create_document"]
+        script = (
+            "data = b'%PDF-1.4\\n' + b'<</Type /Page>>\\n' * 80\n"
+            "open('output.pdf','wb').write(data)\n"
+        )
+        with mock.patch.dict("sys.modules", {"pypdf": None}):
+            result = tool.handler(
+                None, tool.validate({"title": "Huge", "format": "pdf", "script": script})
+            )
+        self.assertEqual(result.error_code, "too_many_pages")
+        self.assertIn(str(MAX_PDF_PAGES), result.summary)
+        self.assertEqual(list(self.files.iterdir()), [])
+
+    def test_a_pdf_within_the_limit_is_kept(self):
+        tool = self.tools["create_document"]
+        script = (
+            "data = b'%PDF-1.4\\n' + b'<</Type /Page>>\\n' * 12\n"
+            "open('output.pdf','wb').write(data)\n"
+        )
+        with mock.patch.dict("sys.modules", {"pypdf": None}):
+            result = tool.handler(
+                None, tool.validate({"title": "Fine", "format": "pdf", "script": script})
+            )
+        self.assertEqual(result.status, "ok", result.summary)
+
+    def test_the_limit_is_advertised_to_the_model(self):
+        from android_agent.documents.reader import MAX_PDF_PAGES
+
+        description = self.tools["create_document"].description
+        self.assertIn(str(MAX_PDF_PAGES), description)
+        self.assertIn("as many pages as the content needs", description)
+
+    def test_the_model_is_told_spreadsheets_must_be_styled(self):
+        description = self.tools["create_document"].description
+        self.assertIn("coloured header", description)
+
+
 class LibraryReportTests(unittest.TestCase):
     def test_availability_is_checked_not_assumed(self):
         found = available_libraries()

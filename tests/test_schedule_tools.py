@@ -143,9 +143,16 @@ class ClockTimeTests(ScheduleToolsTestCase):
     """
 
     def _next_run(self, **arguments):
+        """Create a task and return its next run time.
+
+        Looks the task up by the id the tool returned. all_tasks() is ordered
+        by next_run_at, not insertion, so indexing into it picks a different
+        task depending on what time of day the suite runs - which is how this
+        helper produced a failure at 08:00 and passed at 07:00.
+        """
         result = self.call("schedule_task", **arguments)
         self.assertEqual(result.status, "ok", result.summary)
-        return self.store.all_tasks()[-1].next_run_at
+        return self.store.get(result.data["id"]).next_run_at
 
     def test_a_clock_time_later_today_is_scheduled_today(self):
         target = time.localtime(time.time() + 2 * 3600)

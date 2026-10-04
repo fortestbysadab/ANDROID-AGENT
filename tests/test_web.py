@@ -647,6 +647,71 @@ class ScreenDataTests(WebTestCase):
         names = [tool["name"] for tool in payload["tools"]]
         self.assertEqual(names, sorted(names))
 
+    def test_screenshots_and_photos_appear_alongside_documents(self):
+        """The reported gap: captures were written somewhere the screen never read."""
+        media = Path(self.tmp.name) / "media"
+        files = media / "files"
+        for folder in ("files", "photos", "screenshots", "recordings"):
+            (media / folder).mkdir(parents=True, exist_ok=True)
+        (files / "report.pdf").write_bytes(b"pdf")
+        (media / "screenshots" / "shot.png").write_bytes(b"png")
+        (media / "photos" / "snap.jpg").write_bytes(b"jpg")
+        (media / "recordings" / "note.m4a").write_bytes(b"m4a")
+
+        with mock.patch(
+            "android_agent.documents.store.documents_root", return_value=files
+        ), mock.patch(
+            "android_agent.tools.media.media_root", return_value=media
+        ):
+            _, payload = self.client.request("GET", "/api/files")
+        by_name = {item["name"]: item for item in payload["files"]}
+        self.assertEqual(
+            set(by_name), {"report.pdf", "shot.png", "snap.jpg", "note.m4a"}
+        )
+        self.assertEqual(by_name["shot.png"]["kind"], "screenshot")
+        self.assertEqual(by_name["snap.jpg"]["kind"], "photo")
+        self.assertEqual(by_name["note.m4a"]["kind"], "recording")
+        self.assertEqual(by_name["report.pdf"]["kind"], "document")
+
+    def test_files_are_newest_first_across_every_folder(self):
+        import os
+        import time
+
+        media = Path(self.tmp.name) / "media2"
+        files = media / "files"
+        for folder in ("files", "screenshots"):
+            (media / folder).mkdir(parents=True, exist_ok=True)
+        old = files / "old.pdf"
+        new = media / "screenshots" / "new.png"
+        old.write_bytes(b"a")
+        new.write_bytes(b"b")
+        os.utime(old, (time.time() - 3600,) * 2)
+
+        with mock.patch(
+            "android_agent.documents.store.documents_root", return_value=files
+        ), mock.patch(
+            "android_agent.tools.media.media_root", return_value=media
+        ):
+            _, payload = self.client.request("GET", "/api/files")
+        self.assertEqual([item["name"] for item in payload["files"]], ["new.png", "old.pdf"])
+
+    def test_a_screenshot_can_be_downloaded(self):
+        media = Path(self.tmp.name) / "media3"
+        (media / "screenshots").mkdir(parents=True, exist_ok=True)
+        (media / "files").mkdir(parents=True, exist_ok=True)
+        (media / "screenshots" / "shot.png").write_bytes(b"\x89PNG-data")
+
+        with mock.patch(
+            "android_agent.documents.store.documents_root", return_value=media / "files"
+        ), mock.patch(
+            "android_agent.tools.media.media_root", return_value=media
+        ):
+            status, payload = self.client.request(
+                "GET", "/api/files/download?name=shot.png", csrf=False
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["_raw"], b"\x89PNG-data")
+
     def test_files_lists_the_folder_not_only_known_documents(self):
         """Files the owner dropped in by hand must be visible too."""
         folder = Path(self.tmp.name) / "files"

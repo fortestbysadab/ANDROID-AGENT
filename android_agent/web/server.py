@@ -211,20 +211,27 @@ class Handler(BaseHTTPRequestHandler):
         return self.app.auth.valid_session(self._session_id())
 
     def _serve_document(self, name: str) -> None:
-        """Serve one file from the files folder, by name only."""
-        from android_agent.documents.store import documents_root
+        """Serve one file by name from any folder the agent writes into.
 
+        A name, never a path: separators and leading dots are refused before
+        anything touches the filesystem, and the resolved path must still sit
+        inside one of the known folders.
+        """
         if not name or "/" in name or "\\" in name or name.startswith("."):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "Bad file name."})
             return
-        root = documents_root().resolve()
-        candidate = (root / name).resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError:
-            self._json(HTTPStatus.FORBIDDEN, {"error": "Outside the files folder."})
-            return
-        if not candidate.is_file():
+        candidate = None
+        for _, folder in self._file_folders():
+            try:
+                root = folder.resolve()
+                attempt = (root / name).resolve()
+                attempt.relative_to(root)
+            except (ValueError, OSError):
+                continue
+            if attempt.is_file():
+                candidate = attempt
+                break
+        if candidate is None:
             self._json(HTTPStatus.NOT_FOUND, {"error": "No such file."})
             return
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
@@ -508,42 +515,53 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- helpers ------------------------------------------------------
 
-    def _files(self) -> list[dict[str, object]]:
-        """Everything in the files folder, newest first.
+    def _file_folders(self) -> list[tuple[str, Path]]:
+        """Every folder the agent writes into, with the kind it holds.
 
-        Lists the folder itself rather than only the document store, so files
-        the owner put there by hand are visible too - the screen is meant to
-        answer "what is in my files folder", not "what did you record".
+        Documents and captures were being kept apart for no reason the owner
+        cares about: a screenshot is a file they made and expect to find.
         """
         from android_agent.documents.store import documents_root
+        from android_agent.tools.media import MEDIA_KINDS, media_root
 
+        folders = [("document", documents_root())]
+        root = media_root()
+        for kind in MEDIA_KINDS.values():
+            folders.append((kind.name, Path(root) / kind.folder))
+        return folders
+
+    def _files(self) -> list[dict[str, object]]:
+        """Everything the agent has written, newest first.
+
+        Lists the folders themselves rather than only the document store, so
+        files the owner put there by hand show up too.
+        """
         known = {}
         if self.app.documents is not None:
             for document in self.app.documents.recent():
                 known[Path(document.path).name] = document
 
         entries: list[dict[str, object]] = []
-        try:
-            paths = sorted(
-                (p for p in documents_root().iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-        except OSError:
-            return []
-        for path in paths:
-            stat = path.stat()
-            document = known.get(path.name)
-            entries.append({
-                "name": path.name,
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-                "format": path.suffix.lstrip(".").lower(),
-                "title": document.title if document else path.stem,
-                "version": document.version if document else None,
-                "id": document.document_id if document else None,
-                "has_script": bool(document),
-            })
+        for kind, folder in self._file_folders():
+            try:
+                paths = [path for path in folder.iterdir() if path.is_file()]
+            except OSError:
+                continue  # a folder only exists once something is written there
+            for path in paths:
+                stat = path.stat()
+                document = known.get(path.name)
+                entries.append({
+                    "name": path.name,
+                    "kind": kind,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                    "format": path.suffix.lstrip(".").lower(),
+                    "title": document.title if document else path.stem,
+                    "version": document.version if document else None,
+                    "id": document.document_id if document else None,
+                    "has_script": bool(document),
+                })
+        entries.sort(key=lambda item: item["modified"], reverse=True)
         return entries
 
     def _tools(self) -> list[dict[str, object]]:

@@ -35,21 +35,33 @@ function Failed({ error }) {
 /* ------------------------------------------------------------- files */
 
 const PREVIEWABLE = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+const KIND_LABEL = {
+  document: 'document', photo: 'photo',
+  screenshot: 'screenshot', recording: 'recording',
+};
+const KINDS = ['all', 'document', 'photo', 'screenshot', 'recording'];
 
 export function FilesScreen() {
   const { loading, error, data } = useFetch(api.files);
   const [query, setQuery] = useState('');
+  const [kind, setKind] = useState('all');
   if (loading) return <Loading what="files" />;
   if (error) return <Failed error={error} />;
 
-  const files = (data.files || []).filter((file) =>
-    file.name.toLowerCase().includes(query.trim().toLowerCase())
+  const files = (data.files || []).filter(
+    (file) =>
+      file.name.toLowerCase().includes(query.trim().toLowerCase()) &&
+      (kind === 'all' || file.kind === kind)
   );
+  const counts = (data.files || []).reduce((totals, file) => {
+    totals[file.kind] = (totals[file.kind] || 0) + 1;
+    return totals;
+  }, {});
   if (!data.files?.length) {
     return (
       <p className="empty">
-        No files yet. Ask the agent to make one — “a PDF report on October
-        expenses”, “a spreadsheet of my contacts”.
+        Nothing here yet. Ask the agent to make something — “a PDF report on
+        October expenses” — or take a screenshot or photo.
       </p>
     );
   }
@@ -62,17 +74,50 @@ export function FilesScreen() {
         aria-label="Filter files"
         onChange={(event) => setQuery(event.target.value)}
       />
+      <div
+        className="row"
+        role="group"
+        aria-label="Filter by kind"
+        style={{ maxInlineSize: '76ch', margin: '0 auto 12px' }}
+      >
+        {KINDS.filter((name) => name === 'all' || counts[name]).map((name) => (
+          <button
+            key={name}
+            type="button"
+            className="btn"
+            aria-pressed={kind === name}
+            style={
+              kind === name
+                ? { background: 'var(--accent)', color: 'var(--accent-text)',
+                    borderColor: 'transparent' }
+                : undefined
+            }
+            onClick={() => setKind(name)}
+          >
+            {name === 'all' ? `All (${data.files.length})` : `${name} (${counts[name]})`}
+          </button>
+        ))}
+      </div>
       <div className="cards">
         {files.map((file) => (
           <article className="card" key={file.name}>
             <div className="row">
               <h3>{file.title || file.name}</h3>
-              <span className="tag">{file.format || 'file'}</span>
+              <span className="tag">{KIND_LABEL[file.kind] || 'file'}</span>
+              <span className="tag">{file.format || '—'}</span>
               {file.version > 1 && <span className="tag">v{file.version}</span>}
             </div>
             <div className="meta">
               {file.name} · {fileSize(file.size)} · {when(file.modified)}
             </div>
+            {file.kind === 'recording' && (
+              <audio
+                controls
+                preload="none"
+                src={downloadUrl(file.name)}
+                style={{ inlineSize: '100%', marginBlockStart: 10 }}
+              />
+            )}
             {PREVIEWABLE.has(file.format) && (
               <img
                 src={downloadUrl(file.name)}

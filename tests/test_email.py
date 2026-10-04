@@ -383,6 +383,69 @@ class ToolTests(unittest.TestCase):
             )
 
 
+class DisplayNameTests(unittest.TestCase):
+    """Recipients should see who sent it, not a bare address."""
+
+    def _message(self, **kwargs):
+        smtp = FakeSMTP()
+        connector = GmailChannel(
+            ADDRESS, PASSWORD,
+            imap_factory=lambda: FakeIMAP(), smtp_factory=lambda: smtp, **kwargs,
+        )
+        connector.send(to="bob@example.com", subject="Hi", body="Hello")
+        return smtp.sent[0]
+
+    def _sent(self, **kwargs):
+        """The From header as a human reads it (decoded by the email package)."""
+        return str(self._message(**kwargs)["From"])
+
+    def _wire(self, **kwargs):
+        """The From line as it actually goes over SMTP."""
+        for line in self._message(**kwargs).as_bytes().split(b"\n"):
+            if line.lower().startswith(b"from:"):
+                return line.decode("ascii", "replace")
+        raise AssertionError("no From header was serialised")
+
+    def test_a_default_name_is_used(self):
+        self.assertEqual(self._sent(), f"Android Agent <{ADDRESS}>")
+
+    def test_the_name_is_configurable(self):
+        self.assertEqual(
+            self._sent(display_name="Agent Mailer"), f"Agent Mailer <{ADDRESS}>"
+        )
+
+    def test_a_name_with_punctuation_is_quoted(self):
+        """'Sadab (Android Agent)' must not break the header."""
+        sender = self._sent(display_name="Sadab (Android Agent)")
+        self.assertEqual(sender, f'"Sadab (Android Agent)" <{ADDRESS}>')
+
+    def test_a_non_ascii_name_is_rfc2047_encoded_on_the_wire(self):
+        """Headers must be ASCII on the wire; the email package encodes them.
+
+        Checking message["From"] is not enough - that returns the *decoded*
+        value, so a broken encoder would still look correct there.
+        """
+        wire = self._wire(display_name="সদব এজেন্ট")
+        self.assertIn("=?utf-8?", wire.lower())
+        self.assertTrue(wire.isascii(), "a raw non-ASCII header is invalid SMTP")
+        self.assertIn(ADDRESS, wire)
+
+    def test_the_encoded_name_decodes_back_to_the_original(self):
+        self.assertIn("সদব এজেন্ট", self._sent(display_name="সদব এজেন্ট"))
+
+    def test_an_ascii_name_is_not_needlessly_encoded(self):
+        self.assertIn("Android Agent", self._wire())
+
+    def test_an_empty_name_falls_back_to_the_bare_address(self):
+        self.assertEqual(self._sent(display_name="   "), ADDRESS)
+
+    def test_the_address_is_always_the_configured_mailbox(self):
+        """A display name must never change who the mail is actually from."""
+        for name in ("Agent Mailer", "", "Someone Else <other@evil.com>"):
+            with self.subTest(name=name):
+                self.assertIn(ADDRESS, self._sent(display_name=name))
+
+
 class UntrustedBlockTests(unittest.TestCase):
     def test_the_block_states_the_rule_plainly(self):
         wrapped = as_untrusted_block("EMAIL", "hello")

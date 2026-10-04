@@ -125,6 +125,7 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
             imap_port=settings.email_imap_port,
             smtp_host=settings.email_smtp_host,
             smtp_port=settings.email_smtp_port,
+            display_name=settings.email_display_name,
         )
         logger.info("Email connector enabled for %s", settings.email_address)
 

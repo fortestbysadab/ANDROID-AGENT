@@ -61,6 +61,9 @@ class Settings:
     email_imap_port: int = 993
     email_smtp_host: str = "smtp.gmail.com"
     email_smtp_port: int = 465
+    #: Sender name recipients see. Keep it recognisable as you *and* as
+    #: automated, e.g. "Sadab (Android Agent)".
+    email_display_name: str = "Android Agent"
 
     @property
     def email_enabled(self) -> bool:
@@ -197,6 +200,9 @@ class Settings:
             email_imap_port=_port("ANDROID_AGENT_EMAIL_IMAP_PORT", 993),
             email_smtp_host=(os.environ.get("ANDROID_AGENT_EMAIL_SMTP_HOST") or "smtp.gmail.com").strip(),
             email_smtp_port=_port("ANDROID_AGENT_EMAIL_SMTP_PORT", 465),
+            email_display_name=(
+                os.environ.get("ANDROID_AGENT_EMAIL_DISPLAY_NAME") or "Android Agent"
+            ).strip(),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -215,4 +221,5 @@ class Settings:
             # The address is useful in a log; the app password never is.
             "email_address": self.email_address or "absent",
             "email_app_password": "set" if self.email_app_password else "absent",
+            "email_display_name": self.email_display_name,
         }

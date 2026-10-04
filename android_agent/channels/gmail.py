@@ -40,6 +40,10 @@ IMAP_PORT = 993
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 DEFAULT_TIMEOUT = 25.0
+#: Shown to recipients as the sender name. A bare address looks like spam and
+#: tells the recipient nothing; naming the agent also makes it honest that the
+#: message was sent by software rather than typed by hand.
+DEFAULT_DISPLAY_NAME = "Android Agent"
 #: Fetching a whole mailbox would be slow and pointless; the agent answers
 #: questions about recent mail.
 MAX_LIST = 25
@@ -152,6 +156,7 @@ class GmailChannel:
         smtp_port: int = SMTP_PORT,
         timeout: float = DEFAULT_TIMEOUT,
         body_limit: int = DEFAULT_BODY_LIMIT,
+        display_name: str = DEFAULT_DISPLAY_NAME,
         imap_factory=None,
         smtp_factory=None,
     ) -> None:
@@ -165,6 +170,7 @@ class GmailChannel:
         self.smtp_host, self.smtp_port = smtp_host, smtp_port
         self.timeout = timeout
         self.body_limit = body_limit
+        self.display_name = (display_name or "").strip()
         self._imap_factory = imap_factory or self._default_imap
         self._smtp_factory = smtp_factory or self._default_smtp
 
@@ -269,7 +275,10 @@ class GmailChannel:
             raise ChannelError(f"{to!r} is not a usable email address.", code="invalid_recipient")
 
         message = EmailMessage()
-        message["From"] = formataddr(("", self.address))
+        # formataddr quotes a name containing punctuation and RFC 2047-encodes
+        # a non-ASCII one, so a Bengali or Hindi display name arrives intact
+        # rather than as mojibake.
+        message["From"] = formataddr((self.display_name, self.address))
         message["To"] = recipient
         message["Subject"] = subject
         message["Date"] = formatdate(localtime=True)

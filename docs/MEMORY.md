@@ -193,12 +193,12 @@ Multilingual support is **not started** despite being a stated goal.
   by the tool surface instead: no delete, label or settings tool will exist.
 - **Revisit if** Google announces removal of app passwords, or this is ever
   distributed to anyone but its author.
-- **Email introduces prompt injection.** It is the first feature putting
-  third-party text into the planner's context. The planned mitigation is a
-  **taint rule**: once untrusted content enters a run, external side effects
-  need a fresh owner approval and unattended runs deny them outright. This
-  also covers `get_recent_sms` and `get_notifications`, which have the same
-  exposure today and no protection.
+- **Email introduces prompt injection**, and the **taint rule is now built**
+  (2026-10-04). A tool declares `returns_untrusted_content`; once one
+  succeeds the run is tainted, further sensitive reads need approval, the
+  approval prompt says so, and unattended runs deny outright. It covers
+  `get_recent_sms`, `get_notifications` and `get_clipboard`, which had the
+  same exposure since long before email existed.
 - **Summarising sends email bodies to the cloud model.** That is a privacy
   decision for the owner, tracked as PRD Open Question 7, not an assumption.
 

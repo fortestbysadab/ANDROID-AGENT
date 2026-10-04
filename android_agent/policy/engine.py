@@ -71,6 +71,17 @@ class DefaultPolicy:
                 "approve-indirect-sensitive-read",
                 "sensitive data was not directly requested",
             )
+        if tool.risk is Risk.SENSITIVE_READ and context.tainted:
+            # The owner asked for this run, but content written by a stranger
+            # has already entered it. A request to read contacts or location
+            # may now be the stranger's idea rather than the owner's, so it
+            # stops being covered by the original request.
+            return PolicyResult(
+                PolicyDecision.REQUIRE_APPROVAL,
+                "approve-sensitive-read-after-untrusted-content",
+                "this run has read untrusted content, so further access to "
+                "private data needs confirming",
+            )
         return PolicyResult(PolicyDecision.ALLOW, "allow-owner-bounded", "bounded owner action")
 
 

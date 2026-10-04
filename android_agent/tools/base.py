@@ -25,6 +25,11 @@ class ToolContext:
     chat_id: int
     run_id: str
     direct_user_request: bool = True
+    #: True once this run has read content written by someone other than the
+    #: owner - an email body, an SMS, a notification. From that point the
+    #: model's proposals may be echoing an instruction planted by a stranger,
+    #: so the policy stops treating "the owner asked for this" as given.
+    tainted: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,11 @@ class ToolSpec:
     timeout_seconds: float = 15.0
     version: str = "1"
     idempotent: bool = False
+    #: Set on tools whose output is written by third parties. Reading one
+    #: taints the rest of the run. This is a property of the data source, not
+    #: of the risk level: get_battery_status is sensitive to nobody, while
+    #: get_recent_sms hands the model text a stranger composed.
+    returns_untrusted_content: bool = False
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", self.name):

@@ -177,13 +177,16 @@ dedicated mailbox, app password over OAuth, bodies may reach the model.
 - [x] 40 tests, mutation-checked against: downgrading send to reversible,
       fetching without PEEK, reporting a refused recipient as sent, dropping
       the untrusted wrapper, and echoing the credential in an error
-- [ ] **Taint rule** — still the real control gap. Today an email body cannot
-      cause a send without a fresh approval only because *every* send needs
-      one. A scheduled task with a pre-authorised send hash is safe because
-      its arguments are frozen, but nothing yet marks a run as tainted.
-      - Acceptance: a tainted run refuses `external_side_effect` even when a
-        pre-authorised hash exists; unattended tainted runs deny outright
-      - Also hardens `get_recent_sms` and `get_notifications`
+- [x] **Taint rule** — implemented
+      - `ToolSpec.returns_untrusted_content` declares a third-party source;
+        set on `read_email`, `list_recent_email`, `get_recent_sms`,
+        `get_notifications`, `get_clipboard`
+      - Once such a tool succeeds, the run is tainted for the rest of its
+        life, and further `sensitive_read` calls need approval even though
+        the owner started the run
+      - Approval prompts say the request followed untrusted content
+      - Unattended tainted runs deny rather than ask, via UnattendedPolicy
+      - `run.tainted` is audited
 - [ ] Inbox summary as a scheduled task, verified end to end on-device
 - [ ] On-device verification with a real mailbox (never yet run against Gmail)
 

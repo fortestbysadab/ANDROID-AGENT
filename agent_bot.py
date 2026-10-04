@@ -357,10 +357,20 @@ def build_bot(settings: Settings) -> telebot.TeleBot:
                         "Deny", callback_data=f"deny:{record.approval_id}"
                     ),
                 )
+                # Provenance, not just the action. An approval that looks
+                # reasonable may be echoing an instruction a stranger put in
+                # an email or SMS the agent read earlier in this same run.
+                warning = (
+                    "\n\n⚠️ This request came after reading message content "
+                    "written by someone else. Check it is what you asked for."
+                    if pending.after_untrusted_content
+                    else ""
+                )
                 bot.reply_to(
                     message,
                     f"Approval required for: {pending.call.name.replace('_', ' ')}\n"
-                    f"{approval_preview(pending.call.arguments)}\n\nExpires in 5 minutes.",
+                    f"{approval_preview(pending.call.arguments)}{warning}"
+                    "\n\nExpires in 5 minutes.",
                     reply_markup=keyboard,
                 )
             return

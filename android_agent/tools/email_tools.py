@@ -179,6 +179,7 @@ def email_tools(channel) -> list[ToolSpec]:
             Risk.SENSITIVE_READ,
             list_recent,
             idempotent=True,
+            returns_untrusted_content=True,
         ),
         ToolSpec(
             "read_email",
@@ -190,6 +191,7 @@ def email_tools(channel) -> list[ToolSpec]:
             Risk.SENSITIVE_READ,
             read,
             idempotent=True,
+            returns_untrusted_content=True,
         ),
         ToolSpec(
             "send_email",

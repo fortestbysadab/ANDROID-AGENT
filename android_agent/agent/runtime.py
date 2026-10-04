@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -37,6 +37,10 @@ class PendingApproval:
     tool_version: str
     reason: str
     argument_hash: str
+    #: True when this run had already read third-party content before the
+    #: proposal. The owner should know that: an approval prompt that looks
+    #: reasonable may be echoing an instruction someone emailed them.
+    after_untrusted_content: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,9 @@ class AgentRuntime:
     ) -> RunOutcome:
         run_id = uuid.uuid4().hex
         context = ToolContext(str(actor_id), chat_id, run_id, direct_user_request=True)
+        # Taint is sticky for the whole run: once a stranger's text is in the
+        # context, nothing later in the same run can be assumed clean.
+        tainted = False
         messages: list[Mapping[str, Any]] = []
         skill_instructions = (
             self.skill_router.instructions_for(user_text) if self.skill_router is not None else ""
@@ -164,7 +171,16 @@ class AgentRuntime:
                 if call_counts[signature] > self.limits.max_same_call:
                     return self._budget_outcome(run_id, results, messages, "repeated-call circuit breaker opened")
 
+                context = replace(context, tainted=tainted)
                 result, approval = self._process_call(context, call)
+                if result is not None and result.status == "ok":
+                    proposed = self.registry.get(call.name)
+                    if proposed is not None and proposed.returns_untrusted_content:
+                        tainted = True
+                        self.audit.emit(
+                            "run.tainted",
+                            {"run_id": context.run_id, "tool": call.name},
+                        )
                 if approval is not None:
                     approvals.append(approval)
                     continue
@@ -281,6 +297,7 @@ class AgentRuntime:
                 tool.version,
                 policy.reason,
                 _argument_hash(call.name, tool.version, arguments),
+                after_untrusted_content=context.tainted,
             )
 
         self.audit.emit("tool.started", {"run_id": context.run_id, "tool": tool.name})

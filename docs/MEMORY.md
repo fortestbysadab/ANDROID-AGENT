@@ -85,7 +85,18 @@ Multilingual support is **not started** despite being a stated goal.
 9. **`type_text` cannot reliably type non-ASCII.**
 10. **Legacy `bot.py` still present**, frozen and lint-excluded.
 
-### Multilingual: measured state
+### Multilingual: corrected assessment (2026-10-04)
+
+The model is multilingual and tool summaries are consumed by it rather than
+shown to the owner, so the conversational path already works in Bengali,
+Hindi and English. The earlier "no multilingual support" claim in these docs
+was wrong and has been corrected. The owner declined general i18n work.
+
+What is genuinely still English: approval prompts, scheduled task reports,
+slash-command output and the web console UI — all paths that bypass the
+model. Plus one functional gap, skill routing, below.
+
+### Original measurement (still accurate, narrower significance than claimed)
 - The model understands non-English input and usually replies in kind.
 - All deterministic strings are English (~72 user-facing literals).
 - **Skill routing is English-only and silently degrades.** Measured:

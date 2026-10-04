@@ -170,24 +170,37 @@ every proposal still passes validator → policy → approval → audit.
 `audit.jsonl` (structured, redacted; failures carry `error_code`), `agent.log`,
 and `python -m android_agent.doctor` for configuration diagnosis.
 
-### 8. Multilingual operation — **NOT built**
+### 8. Multilingual operation — **largely working via the model** (assessment corrected 2026-10-04)
 
-The stated product goal includes "works in any language". Today:
+The earlier version of this section overstated the gap. Corrected after
+checking which strings actually reach the owner.
 
-- The underlying model is multilingual, so a non-English request is often
-  *understood*, and replies usually follow the user's language because the
-  model writes them.
-- **But** every tool summary, error message, approval prompt, web console
-  string and system prompt is hard-coded English, and these are what the owner
-  reads when something goes wrong.
-- **Measured defect:** skill routing matches English keyword triggers with
-  substring comparison. `"what is my battery level"` loads 2063 characters of
-  guidance; the Hindi equivalent `"मेरी बैटरी कितनी है"` loads 1261 — the
-  device-control skill never activates. Non-English requests silently get less
-  capable guidance.
-- `type_text` uses ADB `input text`, which cannot reliably type non-ASCII.
+**Working today, with no i18n machinery:** the planner is multilingual, so a
+request in Bengali, Hindi or English is understood and the right tool is
+selected. Deterministic tool summaries are written in English, but they are
+**inputs to the model**, not output to the owner — the model re-renders them
+in the owner's language when it replies. The conversational path therefore
+works in any language the model speaks, which is the bulk of the product.
 
-See **TASKS.md Phase 4** and the Multilingual section in ARCHITECTURE.md.
+**Still English, because these bypass the model entirely:**
+
+| Path | Example |
+|---|---|
+| Approval prompts | "Approval required for: send email … Expires in 5 minutes." |
+| Scheduled task reports | "⏰ Battery check: Battery is at 87%." |
+| Slash commands (`/help`, `/tools`, `/session`, `/media`) | tool listings, session details |
+| Operational replies | "Unauthorized.", "I am still working on your previous request." |
+| Web console UI | buttons, labels, empty states |
+
+**One functional (not cosmetic) gap:** skill routing matches English keyword
+triggers, so a Hindi request loads less procedural guidance than its English
+equivalent — measured at 1261 vs 2063 characters, with the device-control
+skill never activating. The model still understands the request; it simply
+receives weaker guidance. The email skill already demonstrates the fix:
+multilingual triggers, about one line of JSON per skill.
+
+**Owner's decision (2026-10-04):** no general i18n work. The model handles
+the conversational path, which is what matters day to day.
 
 ### 9. Channel connectors — Gmail first — **planned, not built**
 

@@ -99,32 +99,34 @@ is implemented **and** covered by passing tests.
 - [ ] Scheduler support in the web console UI (tools work there; no dedicated
       view)
 
-## Phase 4 — Multilingual `[ ]` (nothing implemented)
+## Phase 4 — Multilingual `[ ]` MOSTLY UNNECESSARY (assessment corrected 2026-10-04)
 
-The product goal says "works in any language". Today nothing supports it.
-Shape depends on **PRD Open Question 1**.
+The original assessment was wrong. Tool summaries are English, but they are
+inputs to the model, which replies in the owner's language — so the
+conversational path already works in Bengali, Hindi and English. The owner
+has declined general i18n work on that basis, which is reasonable.
 
-- [ ] Decide the model: reply-language mirroring vs. configured locale vs.
-      per-message detection `[!]` blocked on Open Question 1
-- [ ] Add `ANDROID_AGENT_LANGUAGE` (or equivalent) to `Settings`
-- [ ] System-prompt directive: reply in the owner's language
-- [ ] **Fix English-only skill routing.** Measured defect: English battery
-      question loads 2063 chars of skill guidance, the Hindi equivalent 1261.
-      Options: multilingual triggers, embeddings, or let the model select.
-      - Files: `android_agent/skills/loader.py`, `bundled/*/skill.json`
+What remains is narrow and specific:
+
+- [ ] **Multilingual skill triggers** — the one functional gap. A Hindi
+      request loads 1261 characters of skill guidance where the English
+      equivalent loads 2063; the device-control skill never fires. The model
+      still understands the request, but operates with less guidance.
+      - Files: `android_agent/skills/bundled/*/skill.json` (one line each)
+      - Precedent: the email skill already ships English, Hindi and Bengali
+        triggers and is covered by a test
       - Acceptance: equivalent requests in English and Hindi select the same
         skills
-- [ ] String inventory and externalisation (~72 user-facing literals across
-      `tools/`, `web/`, `agent_bot.py`)
-- [ ] Translate the four Android-remedy messages (location permission,
-      overlay permission, phantom killer, location off) — these matter most
-      because they are read when something is broken
-- [ ] Locale-aware date/time formatting (currently `%a %d %b`, English-only)
-- [ ] Dynamic `<html lang>` and `dir` in the web console; verify RTL
-- [ ] Confirm Noto fallback renders Devanagari/Bengali on the reference device
-- [ ] Non-ASCII input path for `type_text` (ADB `input text` cannot do it;
-      needs a clipboard-paste strategy or an IME)
-- [ ] Tests: a non-English request completes the same flows as English
+      - Effort: small
+- [ ] Strings that bypass the model and so stay English regardless of the
+      request: approval prompts, scheduled task reports, slash-command
+      output, operational replies, web console UI. Only worth doing if the
+      owner finds them intrusive in practice.
+- [ ] `type_text` cannot reliably type non-ASCII (ADB `input text`). Needs a
+      clipboard-paste strategy. Independent of the rest of this phase.
+
+Dropped from this phase as unnecessary: a translation catalogue, locale
+configuration, and externalising the ~72 deterministic tool strings.
 
 ## Phase 5 — Reliability & Hardening `[-]`
 

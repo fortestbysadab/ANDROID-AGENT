@@ -157,7 +157,25 @@ configuration, and externalising the ~72 deterministic tool strings.
 - [ ] On-device smoke checklist (what to verify manually after a release)
 - [ ] Soak test: scheduler running for 24 h with the phone idle
 
-## Phase 10 — Documents `[-]`
+## Phase 10 — Documents `[-]` CORRECTION PENDING (2026-10-04)
+
+**The model implemented was wrong.** The owner said "edit python script and
+create new version"; that was taken as "keep a Markdown source" and built as
+fixed templates. A fixed renderer can only ever emit a title and paragraphs,
+so an expenses report came out bland — no table, no totals, no chart — which
+is exactly what the owner reported.
+
+**What was actually asked for:** the agent writes a *Python script*, runs it
+in an isolated folder, and the script produces the file. The script is the
+editable source; a revision edits the script and re-runs it. Output
+directory stays `<shared storage>/AndroidAgent/files`.
+
+This is arbitrary code execution, which the project has refused since day
+one, so it needs real containment rather than good intentions. Design and
+the open question are in ARCHITECTURE.md § Script-generated documents.
+The template renderers stay as a fallback for trivial cases.
+
+## Phase 10a — Template renderers (built, demoted to fallback)
 
 Model, set by the owner: **a document is its source, not its bytes.** PDFs
 cannot be edited, so a revision re-renders from stored Markdown and produces

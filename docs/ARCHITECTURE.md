@@ -459,6 +459,52 @@ banking and password managers. That is the largest permission this project
 would hold, and it is why stage 1 exists first — to find out how much of the
 value arrives without it.
 
+## Script-generated documents (design, not yet built)
+
+The agent writes a Python script; the script writes the file. This is the
+only way to get a real report — a table with totals, a chart, a layout the
+owner can argue with — because a fixed template cannot know what an expenses
+report should look like.
+
+**It is also arbitrary code execution by an untrusted planner**, which this
+project has refused from the start. Treating it as "just another tool" would
+be dishonest. What makes it acceptable is containment, and the strength of
+the containment decides how much friction the owner must accept.
+
+### The concrete risk
+
+A script runs as the Termux user. Without isolation it can read
+`~/.env`, which holds the Telegram bot token, the LLM API key and the Gmail
+app password — the last of which grants the whole mailbox. Exfiltration is
+four lines of Python. Scrubbing environment variables does not help: the
+file is on disk.
+
+### Layers
+
+1. **Filesystem isolation — `proot`** (`pkg install proot`). The script sees
+   its own workspace and a read-only Python; `$HOME` and the state directory
+   are not in its view. This is the layer that actually contains the risk.
+2. **Resource limits**, always: `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_FSIZE`,
+   `RLIMIT_NPROC`, plus a wall-clock timeout. Stops a runaway loop filling
+   the phone or draining the battery.
+3. **Scrubbed environment**: no `ANDROID_AGENT_*` variables are passed.
+4. **One workspace per document**, named by document id, so scripts cannot
+   read each other's working files.
+5. **Output by copy**: the script writes into its workspace; the agent copies
+   the declared output into the files folder. The script never holds a handle
+   to shared storage.
+
+### Friction follows containment
+
+- **With `proot`:** the script cannot reach secrets, so generation runs
+  without an approval prompt each time.
+- **Without `proot`:** the script can read `~/.env`, so running one is an
+  approval-gated action and the full script is shown before it runs.
+
+That asymmetry is deliberate: the owner should not be asked to rubber-stamp
+code they will stop reading by the third document, and should be asked when
+there is genuinely nothing else protecting them.
+
 ## Architecture Decisions
 
 ```text

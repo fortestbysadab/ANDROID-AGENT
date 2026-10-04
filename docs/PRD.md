@@ -223,6 +223,49 @@ attachments outbound, multiple accounts, calendar.
 - A subject line in Hindi, Bengali or with emoji displays correctly.
 - The mailbox credential never appears in logs, audit or error text.
 
+### 10. App-level automation — **planned, staged**
+
+**Description.** Drive other apps to complete a repeated task end to end:
+open an app, find the right control, act, confirm it worked.
+
+**The blocker today** is perception, not action. `tap_screen` and
+`swipe_screen` already work over ADB, but they are **blind** — the agent taps
+a coordinate without knowing what is there, so any layout change, dialog or
+slow load silently taps the wrong thing. Blind automation on a phone that can
+send messages and spend money is not acceptable.
+
+**Two ways to see the screen**
+
+| | `uiautomator dump` (ADB) | Accessibility service |
+|---|---|---|
+| What it returns | the same node tree: `resource-id`, `text`, `content-desc`, `bounds`, `clickable`, `enabled` | the same tree, plus live events |
+| Needs a new APK | no | **yes** — `BIND_ACCESSIBILITY_SERVICE` is signature-level and only the system may bind it, so it must ship in an installed app |
+| Needs wireless ADB | yes, re-enabled after each reboot | no |
+| Event-driven triggers | no, polling only | yes |
+| Speed | ~0.5–1 s per read | faster, no shell round trip |
+| Standing grant | none beyond ADB | reads **all screen content in every app**, permanently until revoked |
+
+**Decision: stage it.** Stage 1 uses `uiautomator dump`, which delivers the
+structured perception this feature actually needs, using transport that
+already exists. Stage 2 adds the accessibility service once there are real
+workflows proving what is still missing — chiefly surviving a reboot without
+re-enabling ADB, and reacting to events.
+
+**Requirements (stage 1)**
+- The agent acts on **named elements**, never raw coordinates chosen by the
+  model.
+- Every step verifies the screen changed as expected before the next one.
+- A workflow has a step budget and aborts on an unexpected screen.
+- Screen content is third-party text and taints the run, exactly like email.
+
+**Acceptance criteria**
+- A workflow aborts rather than guessing when the expected element is absent.
+- The agent can report *why* it stopped, naming the screen it did not expect.
+- Changing the phone's language does not break a workflow that matches on
+  `resource-id`.
+- No automation step can send, pay or delete without the existing approval
+  gate.
+
 ---
 
 ## User Flows
@@ -359,6 +402,14 @@ These are genuinely unresolved. They are **not** assumptions.
    Gmail that the main account forwards to would bound the blast radius of a
    stolen credential.
 ## Assumptions
+
+9. **Which two or three workflows?** The design needs real examples. Naming
+   them changes what gets built: a messaging flow needs text entry and a
+   recipient check, a bill payment needs a confirmation screen read back, a
+   data-entry flow needs scrolling and lists.
+10. **Is a persistent on-screen reader acceptable later?** Stage 2's
+    accessibility service can read every app's screen, permanently. That is
+    the largest standing grant this project would hold.
 
 Recorded so they can be challenged:
 

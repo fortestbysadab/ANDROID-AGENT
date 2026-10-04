@@ -375,6 +375,88 @@ assume ASCII; truncate on character boundaries, not bytes.
 then a clear failure; bounded fetch count and body size; never report a send
 as successful unless the SMTP transaction was accepted.
 
+## App-level automation (planned, staged)
+
+### Perception
+
+`uiautomator dump` returns Android's accessibility node tree over the ADB
+connection the project already uses. It is the same data an accessibility
+service receives, minus live events. Each node carries `resource-id`, `text`,
+`content-desc`, `class`, `bounds`, `clickable` and `enabled` — enough to find
+"the Send button" rather than guessing a pixel.
+
+Implementation details that matter, from practitioners who hit them:
+
+- Dump **to a file then read it back** (`uiautomator dump /data/local/tmp/ui.xml`
+  then `cat`). Piping to `/dev/tty` intermittently returns empty or truncated
+  XML.
+- Dumps fail on some animating screens ("could not get idle state"); retry
+  once after a short settle, then report rather than tapping blind.
+- Invisible nodes persist in the tree: a dialog's elements can be present
+  while no dialog is shown. Filter on `clickable`/`enabled` and bounds inside
+  the screen, never on existence alone.
+
+### Element matching, in priority order
+
+1. `resource-id` — stable across languages and most app updates.
+2. `content-desc` — usually localised, but set deliberately by developers.
+3. visible `text` — last resort.
+
+**This ordering is a multilingual requirement, not just robustness.** A
+workflow matching the literal string "Send" breaks the moment the phone's
+language changes; `resource-id` does not. Any text matching must be
+Unicode-aware and must not casefold with ASCII assumptions.
+
+### Action
+
+The model never supplies coordinates. It selects an **element reference**
+from the parsed screen, and application code resolves that to the centre of
+the element's bounds and taps it. This removes an entire class of failure —
+and of risk, since a model cannot invent a tap on something it was never
+shown.
+
+### The act / verify loop
+
+```text
+read screen  ->  model picks an element and an action
+             ->  policy check
+             ->  act
+             ->  read screen again
+             ->  did the expected thing change?
+                   yes -> next step
+                   no  -> abort and report the screen we did not expect
+```
+
+A workflow carries a **step budget**. Blind retry loops on a phone that can
+spend money are not acceptable; stopping and reporting is.
+
+### Safety
+
+- **Screen content is untrusted.** A dump contains other people's messages,
+  so the screen-reading tool sets `returns_untrusted_content` and taints the
+  run, exactly like email. An app showing "tap Send to confirm" must not be
+  able to steer the agent.
+- **Risk classes:** `read_screen` is `sensitive_read` (it can see anything on
+  display, including other apps' content); `tap_element` and `type_into` stay
+  `raw_control`.
+- Nothing bypasses the existing gates: a workflow that ends in sending a
+  message still meets the approval prompt.
+- Workflows are **stored recipes**, not free-form improvisation each run, so
+  what a scheduled automation will do is reviewable in advance.
+
+### Stage 2: accessibility service
+
+Worth building only once real workflows show what stage 1 cannot do. It needs
+a separate Android app, because `BIND_ACCESSIBILITY_SERVICE` is a
+signature-level permission that only the system may bind, and the service
+must be enabled by hand in Settings. In exchange: no wireless ADB (so it
+survives a reboot untouched), event-driven triggers, and faster reads.
+
+The cost is a standing grant to read every screen in every app, including
+banking and password managers. That is the largest permission this project
+would hold, and it is why stage 1 exists first — to find out how much of the
+value arrives without it.
+
 ## Architecture Decisions
 
 ```text
@@ -432,6 +514,23 @@ Reason: A concurrency test failed ~40% of runs against the naive version —
         two connections both ran the same task, which for SMS means sending
         twice.
 Consequences: Tasks carry a 5-minute lease; a killed process retries.
+```
+
+```text
+Decision: Structured screen reading before an accessibility service
+Date: 2026-10-04
+Context: Blind coordinate tapping is unreliable and unsafe; the owner chose
+         an accessibility service for structured perception.
+Decision: Stage it. `uiautomator dump` over existing ADB first; accessibility
+          service later, driven by what stage 1 cannot do.
+Alternatives: Build the APK immediately; screenshot plus a vision model.
+Reason: uiautomator returns the same node tree with no new APK, no permanent
+        all-screens grant, and no new runtime dependency. A vision model
+        would be slower, cost tokens per step, and send screen contents -
+        including other people's messages - to the cloud.
+Consequences: Stage 1 still needs wireless ADB re-enabled after each reboot
+              and cannot react to events. Those two gaps are the concrete
+              case for stage 2, rather than an assumption.
 ```
 
 ```text

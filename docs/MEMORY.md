@@ -202,6 +202,31 @@ Multilingual support is **not started** despite being a stated goal.
 - **Summarising sends email bodies to the cloud model.** That is a privacy
   decision for the owner, tracked as PRD Open Question 7, not an assumption.
 
+## Planned: app-level automation (decided 2026-10-04)
+
+- The owner chose structured screen perception over screenshots and a vision
+  model. Correct call: a vision model would be slower, cost tokens per step,
+  and send other people's on-screen content to the cloud.
+- **Researched finding that changed the plan:** `uiautomator dump` over ADB
+  returns the *same accessibility node tree* an accessibility service would —
+  `resource-id`, `text`, `content-desc`, `bounds`, `clickable` — with no new
+  APK and no standing all-screens grant. An accessibility service needs its
+  own installed app, because `BIND_ACCESSIBILITY_SERVICE` is signature-level
+  and only the system may bind it.
+- **Therefore staged.** Stage 1: `uiautomator dump`. Stage 2: the
+  accessibility service, justified by what stage 1 cannot do — surviving a
+  reboot without re-enabling ADB, and event-driven triggers.
+- **Match on `resource-id` first.** Matching visible text breaks when the
+  phone's language changes, which matters directly for the multilingual goal.
+- **The model never supplies coordinates.** It picks an element from the last
+  screen read; code resolves the tap. A model cannot tap what it was not
+  shown.
+- **Screen content taints the run**, like email: a dump contains other
+  people's messages.
+- Known pitfalls to respect: dump to a file then `cat` (piping to `/dev/tty`
+  truncates); invisible dialog nodes persist in the tree, so filter on
+  clickable/enabled and bounds rather than existence.
+
 ## External Integrations
 
 **Telegram Bot API.** Long polling via `pyTelegramBotAPI`; inline keyboards for

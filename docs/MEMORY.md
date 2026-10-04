@@ -192,6 +192,25 @@ model. Plus one functional gap, skill routing, below.
 
 ---
 
+## Documents: scripts, not templates (2026-10-04)
+
+- The owner said "edit python script and create new version". That was first
+  read as "keep a Markdown source" and built as fixed templates. It produced
+  a bland report, the owner rejected it, and the templates were deleted.
+- **The model: the agent writes a Python script, runs it isolated, and the
+  script writes the file.** The script is the source; a revision edits it and
+  re-runs.
+- This is the only place in the project where model-written code executes.
+  It is contained by proot (hiding `$HOME`, `/sdcard`, `/storage`), resource
+  limits, a scrubbed environment and output-by-copy.
+- **Risk follows containment**: with proot, generating a document needs no
+  approval; without it, every run is approval-gated and shows the code. The
+  owner installed proot.
+- Workspaces live under `$PREFIX/tmp` deliberately: inside `$HOME` they would
+  be hidden by the same bind that hides the secrets.
+- Each run clears its workspace. Without that, the previous version's output
+  is still present and the new run looks like it produced nothing.
+
 ## Planned: Gmail connector (decided 2026-10-04, not yet built)
 
 - **Recommendation: IMAP/SMTP with a Gmail app password**, not OAuth. Reasons:

@@ -1,32 +1,38 @@
-"""Tools for creating, revising and reading documents.
+"""Documents: the agent writes a Python script, the script writes the file.
 
-The model the owner asked for: **keep the source, regenerate the output.**
-A PDF cannot be edited, but the Markdown that produced it can, so a revision
-edits the stored source and renders a new numbered version. The previous
-version stays on disk — the owner asked for a new one, not a destroyed one.
+A fixed template can only ever produce a title and some paragraphs. A real
+report wants a table with totals, a chart, a layout — things that depend
+entirely on what the document is. So the model writes the generating script,
+and that script is the document's source: a revision edits the script and
+runs it again.
 
-Reading covers files the agent did not write, so `read_document` returns
-untrusted content and taints the run, exactly like email: a PDF someone sent
-can contain text aimed at the agent.
+The script runs in an isolated workspace (see `documents/sandbox.py`). With
+proot installed it cannot see `$HOME`, so it cannot read the `.env` that
+holds the Gmail app password; without proot it can, and running one is
+therefore an approval-gated action instead. The risk level of these tools is
+chosen at registration from which of those is true.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from android_agent.documents.render import (
-    DOCUMENT,
-    FORMATS,
-    SHEET,
-    SLIDES,
-    RenderError,
-    available_formats,
-    backend_for,
+from android_agent.documents.reader import (
+    ALLOWED_FORMATS,
+    ReadError,
+    library_summary,
     read_file_text,
-    render,
+)
+from android_agent.documents.sandbox import (
+    SCRIPT_NAME,
+    pick_output,
+    proot_available,
+    run_script,
+    workspace_for,
 )
 from android_agent.documents.store import DocumentStore, documents_root, new_document_id, slugify
 
@@ -34,8 +40,14 @@ from .base import Risk, ToolContext, ToolResult, ToolSpec
 
 logger = logging.getLogger(__name__)
 
-MAX_SOURCE_CHARS = 20000
-MAX_ROWS = 2000
+MAX_SCRIPT_CHARS = 20000
+
+SCRIPT_GUIDE = (
+    "Write a complete Python script that produces the file. It runs in an "
+    "empty private folder with no network and no access to the phone's "
+    "storage; write the result to 'output.<format>' in the working "
+    "directory. Available libraries beyond the standard library: "
+)
 
 CREATE_SCHEMA = {
     "type": "object",
@@ -45,38 +57,16 @@ CREATE_SCHEMA = {
             "description": "Human title, also used for the filename.",
         },
         "format": {
-            "type": "string", "enum": sorted(FORMATS),
-            "description": "md, txt, html or pdf for prose; csv, json or xlsx "
-                           "for tables; pptx for slides.",
+            "type": "string", "enum": sorted(ALLOWED_FORMATS),
+            "description": "Extension of the file the script will write.",
         },
-        "content": {
-            "type": "string", "maxLength": MAX_SOURCE_CHARS,
-            "description": "Markdown for prose formats. Headings, bullets, "
-                           "numbered lists, bold, italic, inline code and "
-                           "fenced blocks are supported.",
-        },
-        "rows": {
-            "type": "array", "maxItems": MAX_ROWS,
-            "description": "For csv, json or xlsx. First row is the header.",
-            "items": {"type": "array", "items": {"type": "string"}},
-        },
-        "slides": {
-            "type": "array", "maxItems": 100,
-            "description": "For pptx: a title and bullets per slide.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "maxLength": 200},
-                    "bullets": {
-                        "type": "array", "maxItems": 20,
-                        "items": {"type": "string", "maxLength": 300},
-                    },
-                },
-                "additionalProperties": False,
-            },
+        "script": {
+            "type": "string", "minLength": 1, "maxLength": MAX_SCRIPT_CHARS,
+            "description": "Complete Python script. Write the result to "
+                           "'output.<format>' in the current directory.",
         },
     },
-    "required": ["title", "format"],
+    "required": ["title", "format", "script"],
     "additionalProperties": False,
 }
 
@@ -87,32 +77,17 @@ REVISE_SCHEMA = {
             "type": "string", "minLength": 1, "maxLength": 120,
             "description": "Document id from list_documents, or its exact title.",
         },
-        "content": {"type": "string", "maxLength": MAX_SOURCE_CHARS},
-        "rows": {
-            "type": "array", "maxItems": MAX_ROWS,
-            "items": {"type": "array", "items": {"type": "string"}},
-        },
-        "slides": {
-            "type": "array", "maxItems": 100,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "maxLength": 200},
-                    "bullets": {
-                        "type": "array", "maxItems": 20,
-                        "items": {"type": "string", "maxLength": 300},
-                    },
-                },
-                "additionalProperties": False,
-            },
+        "script": {
+            "type": "string", "minLength": 1, "maxLength": MAX_SCRIPT_CHARS,
+            "description": "The complete corrected script, not a description "
+                           "of the change.",
         },
         "format": {
-            "type": "string", "enum": sorted(FORMATS),
-            "description": "Only to re-render the same content in a different "
-                           "format. Leave unset to keep the current one.",
+            "type": "string", "enum": sorted(ALLOWED_FORMATS),
+            "description": "Only if the output format is changing too.",
         },
     },
-    "required": ["document"],
+    "required": ["document", "script"],
     "additionalProperties": False,
 }
 
@@ -121,78 +96,74 @@ READ_SCHEMA = {
     "properties": {
         "name": {
             "type": "string", "minLength": 1, "maxLength": 200,
-            "description": "Filename inside the files folder, or a document id.",
+            "description": "Filename in the files folder, or a document id.",
         },
     },
     "required": ["name"],
     "additionalProperties": False,
 }
 
+SHOW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "document": {"type": "string", "minLength": 1, "maxLength": 120},
+    },
+    "required": ["document"],
+    "additionalProperties": False,
+}
+
 NO_ARGS = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
-def _source_for(kind: str, arguments: Mapping[str, Any]):
-    if kind == DOCUMENT:
-        return arguments.get("content")
-    if kind == SHEET:
-        return arguments.get("rows")
-    return arguments.get("slides")
-
-
-def _missing_source_message(kind: str) -> str:
-    return {
-        DOCUMENT: "This format needs 'content' as Markdown text.",
-        SHEET: "This format needs 'rows', a list of rows with the header first.",
-        SLIDES: "This format needs 'slides', each with a title and bullets.",
-    }[kind]
-
-
 def document_tools(store: DocumentStore) -> list[ToolSpec]:
-    def _write(document_id, title, kind, fmt, source, version) -> Path:
-        data = render(kind, fmt, title=title, source=source)
+    isolated = proot_available()
+
+    def _build(document_id: str, title: str, fmt: str, script: str, version: int):
+        """Run the script and copy its output into the files folder."""
+        workspace = workspace_for(document_id)
+        result = run_script(script, workspace)
+        if not result.ok:
+            return None, ToolResult.error(
+                f"The script failed, so no file was written.\n\n{result.diagnostic}",
+                code="script_failed",
+                retryable=True,
+            )
+        produced = pick_output(result.produced, fmt)
+        if produced is None:
+            names = ", ".join(path.name for path in result.produced) or "nothing"
+            return None, ToolResult.error(
+                f"The script ran but wrote no .{fmt} file (it produced {names}). "
+                f"Write the result to 'output.{fmt}' in the working directory.",
+                code="no_output",
+                retryable=True,
+            )
+
         folder = documents_root()
         suffix = f"-v{version}" if version > 1 else ""
-        path = folder / f"{slugify(title)}{suffix}.{fmt}"
-        path.write_bytes(data)
+        destination = folder / f"{slugify(title)}{suffix}.{fmt}"
+        shutil.copy2(produced, destination)
         store.save(
-            document_id=document_id, title=title, kind=kind, fmt=fmt,
-            source=source, version=version, path=str(path),
+            document_id=document_id, title=title, kind="script", fmt=fmt,
+            source=script, version=version, path=str(destination),
         )
-        return path
+        return destination, None
 
     def create(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
         del context
-        fmt = str(arguments["format"])
-        kind = FORMATS[fmt][0]
-        source = _source_for(kind, arguments)
-        if not source:
-            return ToolResult.error(_missing_source_message(kind), code="missing_content")
-
-        usable, reason = backend_for(fmt)
-        if not usable:
-            return ToolResult.error(
-                f"{reason} Formats available right now: "
-                f"{', '.join(available_formats())}.",
-                code="backend_missing",
-            )
-
         title = str(arguments["title"]).strip()
+        fmt = str(arguments["format"])
         document_id = new_document_id()
-        try:
-            path = _write(document_id, title, kind, fmt, source, 1)
-        except RenderError as exc:
-            return ToolResult.error(str(exc), code=exc.code)
-        except OSError as exc:
-            return ToolResult.error(
-                f"The file could not be written: {type(exc).__name__}.",
-                code="write_failed", retryable=True,
-            )
+        destination, failure = _build(
+            document_id, title, fmt, str(arguments["script"]), 1
+        )
+        if failure is not None:
+            return failure
         return ToolResult.ok(
-            f"Created {path.name} ({path.stat().st_size} bytes) in the files folder. "
-            f"Ask for changes and I will make version 2.",
+            f"Created {destination.name} ({destination.stat().st_size} bytes). "
+            "Ask for changes and I will edit the script and make version 2.",
             {
                 "id": document_id, "title": title, "format": fmt, "version": 1,
-                "artifact_path": str(path), "saved_to": str(path),
+                "artifact_path": str(destination), "saved_to": str(destination),
             },
         )
 
@@ -206,41 +177,36 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
                 "to see the current ids.",
                 code="unknown_document",
             )
-
         fmt = str(arguments.get("format") or document.fmt)
-        kind = FORMATS[fmt][0]
-        if kind != document.kind:
-            return ToolResult.error(
-                f"{document.title} is a {document.kind}; {fmt} is a {kind} format.",
-                code="format_mismatch",
-            )
-        usable, reason = backend_for(fmt)
-        if not usable:
-            return ToolResult.error(reason, code="backend_missing")
-
-        source = _source_for(kind, arguments)
-        if source is None:
-            source = document.source
-        if not source:
-            return ToolResult.error(_missing_source_message(kind), code="missing_content")
-
         version = document.version + 1
-        try:
-            path = _write(document.document_id, document.title, kind, fmt, source, version)
-        except RenderError as exc:
-            return ToolResult.error(str(exc), code=exc.code)
-        except OSError as exc:
-            return ToolResult.error(
-                f"The file could not be written: {type(exc).__name__}.",
-                code="write_failed", retryable=True,
-            )
+        destination, failure = _build(
+            document.document_id, document.title, fmt, str(arguments["script"]), version
+        )
+        if failure is not None:
+            return failure
         return ToolResult.ok(
-            f"Updated {document.title}: version {version} saved as {path.name}. "
-            f"Version {document.version} is still there.",
+            f"Updated {document.title}: version {version} saved as "
+            f"{destination.name}. Version {document.version} is still there.",
             {
                 "id": document.document_id, "title": document.title, "format": fmt,
-                "version": version, "artifact_path": str(path), "saved_to": str(path),
+                "version": version, "artifact_path": str(destination),
+                "saved_to": str(destination),
             },
+        )
+
+    def show_script(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+        """The script is the source, so the owner can always see it."""
+        del context
+        reference = str(arguments["document"]).strip()
+        document = store.get(reference) or store.find_by_title(reference)
+        if document is None:
+            return ToolResult.error(
+                f"There is no document called {reference!r}.", code="unknown_document"
+            )
+        return ToolResult.ok(
+            f"Script for {document.title} (v{document.version}):\n\n"
+            f"```python\n{document.source}\n```",
+            {"id": document.document_id, "script": document.source},
         )
 
     def listing(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
@@ -248,8 +214,7 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
         documents = store.recent()
         if not documents:
             return ToolResult.ok(
-                "No documents yet. Formats available right now: "
-                f"{', '.join(available_formats())}.",
+                f"No documents yet. Scripts can use: {library_summary()}.",
                 {"documents": []},
             )
         lines = "\n".join(document.summary_line() for document in documents)
@@ -264,7 +229,6 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
         document = store.get(reference) or store.find_by_title(reference)
         path = Path(document.path) if document else documents_root() / reference
 
-        # Stay inside the files folder: a name is not a path.
         root = documents_root().resolve()
         try:
             resolved = path.resolve()
@@ -279,7 +243,7 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
 
         try:
             text = read_file_text(resolved)
-        except RenderError as exc:
+        except ReadError as exc:
             return ToolResult.error(str(exc), code=exc.code)
         except OSError as exc:
             return ToolResult.error(
@@ -297,27 +261,51 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
             {"name": resolved.name, "path": str(resolved), "text": text},
         )
 
+    # Friction follows containment: with proot the script cannot reach the
+    # owner's secrets, so generating a document is an ordinary action. Without
+    # it, every run is approval-gated and the owner sees the code first.
+    write_risk = Risk.DEVICE_MUTATION if isolated else Risk.EXTERNAL_SIDE_EFFECT
+    isolation_note = (
+        "The script runs isolated from the phone's storage and settings."
+        if isolated
+        else "WARNING: proot is not installed, so the script is NOT isolated. "
+             "Tell the owner to run `pkg install proot`."
+    )
+
     return [
         ToolSpec(
             "create_document",
-            "Create a file in the owner's files folder: md, txt, html or pdf "
-            "from Markdown; csv, json or xlsx from rows; pptx from slides. Use "
-            "when the owner asks for a document, report, note, list or "
-            "spreadsheet. Write the content in the owner's own language. The "
-            "source is kept, so the owner can ask for changes afterwards.",
+            "Create a file by writing a Python script that generates it: PDF, "
+            "XLSX, CSV, HTML, PNG chart, DOCX, PPTX and more. Use for any "
+            "document, report, spreadsheet or chart. Design it properly — a "
+            "report means headings, a table with totals and a chart where it "
+            "helps, not a wall of text. " + SCRIPT_GUIDE + library_summary() +
+            ". " + isolation_note,
             CREATE_SCHEMA,
-            Risk.DEVICE_MUTATION,
+            write_risk,
             create,
+            timeout_seconds=90.0,
         ),
         ToolSpec(
             "revise_document",
-            "Make a new version of a document with changed content or a "
-            "different format. Use whenever the owner wants something altered: "
-            "send the full corrected content, not a description of the change. "
-            "Earlier versions are kept.",
+            "Make a new version by editing the generating script. Use whenever "
+            "the owner wants the content or the design changed. Call "
+            "show_document_script first unless you already have the script, "
+            "then send the complete corrected script. Earlier versions are kept.",
             REVISE_SCHEMA,
-            Risk.DEVICE_MUTATION,
+            write_risk,
             revise,
+            timeout_seconds=90.0,
+        ),
+        ToolSpec(
+            "show_document_script",
+            "Show the Python script that produced a document, so it can be "
+            "edited precisely. Use before revising a document you did not just "
+            "create.",
+            SHOW_SCHEMA,
+            Risk.READ_ONLY,
+            show_script,
+            idempotent=True,
         ),
         ToolSpec(
             "list_documents",
@@ -341,3 +329,6 @@ def document_tools(store: DocumentStore) -> list[ToolSpec]:
             returns_untrusted_content=True,
         ),
     ]
+
+
+__all__ = ["SCRIPT_NAME", "document_tools"]

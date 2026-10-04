@@ -157,49 +157,32 @@ configuration, and externalising the ~72 deterministic tool strings.
 - [ ] On-device smoke checklist (what to verify manually after a release)
 - [ ] Soak test: scheduler running for 24 h with the phone idle
 
-## Phase 10 — Documents `[-]` CORRECTION PENDING (2026-10-04)
+## Phase 10 — Documents (script-generated) `[-]`
 
-**The model implemented was wrong.** The owner said "edit python script and
-create new version"; that was taken as "keep a Markdown source" and built as
-fixed templates. A fixed renderer can only ever emit a title and paragraphs,
-so an expenses report came out bland — no table, no totals, no chart — which
-is exactly what the owner reported.
+The agent writes a Python script; the script writes the file. The first
+attempt used fixed Markdown templates, which can only ever emit a title and
+paragraphs — the owner's expenses report came out bland, correctly reported
+as wrong, and the templates were deleted rather than left as dead code.
 
-**What was actually asked for:** the agent writes a *Python script*, runs it
-in an isolated folder, and the script produces the file. The script is the
-editable source; a revision edits the script and re-runs it. Output
-directory stays `<shared storage>/AndroidAgent/files`.
-
-This is arbitrary code execution, which the project has refused since day
-one, so it needs real containment rather than good intentions. Design and
-the open question are in ARCHITECTURE.md § Script-generated documents.
-The template renderers stay as a fallback for trivial cases.
-
-## Phase 10a — Template renderers (built, demoted to fallback)
-
-Model, set by the owner: **a document is its source, not its bytes.** PDFs
-cannot be edited, so a revision re-renders from stored Markdown and produces
-a new numbered version; the earlier file stays.
-
-- [x] `documents/render.py` — Markdown subset → md, txt, html, pdf; rows →
-      csv, json, xlsx; slides → pptx. Backends optional, each naming its
-      install command when missing.
-- [x] `documents/store.py` — source, version and path per document, in
-      `documents.db`; files in `<media root>/files`
-- [x] Four tools: create, revise, list, read
-- [x] `read_document` returns untrusted content and taints the run — a PDF
-      someone sent can contain text aimed at the agent
-- [x] Path containment: a name is not a path; reads stay in the files folder
-- [x] Non-ASCII titles keep their own script in filenames rather than being
-      transliterated
-- [x] Documents skill, with English, Hindi and Bengali triggers
-- [x] 43 tests, mutation-checked against overwriting v1, escaping the files
-      folder, dropping HTML escaping, and not declaring untrusted output
-- [ ] Verify PDF output on-device (reportlab is installed there, absent in
-      the sandbox, so the reportlab path is untested)
-- [ ] PPTX: needs `pkg install python-lxml python-pillow` then
-      `pip install python-pptx`
-- [ ] `pypdf` for reading PDFs (`pip install pypdf`)
+- [x] `documents/sandbox.py` — proot isolation, resource limits, scrubbed
+      environment, one workspace per document, output copied out
+- [x] Workspaces under `$PREFIX/tmp`, outside `$HOME`, so hiding home does
+      not hide the script's own folder
+- [x] Workspace cleared before each run (a reused one made revision 2 look
+      like a script that wrote nothing — caught by a test)
+- [x] `documents/reader.py` — PDF, XLSX, PPTX and text extraction, plus
+      reporting which optional libraries a script may import
+- [x] Tools: create, revise, show script, list, read
+- [x] Risk follows containment: with proot, writing is DEVICE_MUTATION; with
+      no proot it is EXTERNAL_SIDE_EFFECT so the owner sees the code first
+- [x] Script failures return the traceback and write nothing; a failed
+      revision leaves the previous version intact
+- [x] Documents skill rewritten around scripts and *design* — tables with
+      totals, charts, margins — not just correct words
+- [x] 48 tests, mutation-checked against ungating without proot, an unscrubbed
+      environment, not hiding home, and reporting failures as success
+- [ ] Verify on-device: proot isolation and a real reportlab PDF
+- [ ] Optional libraries the owner may want: `pip install pypdf matplotlib`
 
 ## Phase 8 — Channel connectors: Gmail `[-]`
 

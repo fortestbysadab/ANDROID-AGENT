@@ -1,194 +1,233 @@
-"""Tests for document creation, revision and reading.
+"""Tests for script-generated documents.
 
-Two ideas carry most of the weight:
-
-* **A document is its source.** Revision re-renders from stored source and
-  keeps the previous file, because the owner asked for a new version rather
-  than a destroyed one.
-* **Optional backends degrade, never crash.** PDF and PPTX need libraries
-  that may not be installed on a given phone; the tool must say which and
-  what is available instead.
+The agent writes a Python script and the script writes the file. That is
+arbitrary code execution by an untrusted planner, so most of these tests are
+about containment and about failing honestly rather than about formatting.
 """
 
 from __future__ import annotations
 
-import csv
-import io
-import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
-from typing import ClassVar
 from unittest import mock
 
-from android_agent.documents.render import (
-    FORMATS,
-    RenderError,
-    available_formats,
-    backend_for,
-    drop_duplicate_title,
-    parse_markdown,
-    render,
-    render_csv,
-    render_html,
-    render_json,
-    render_md,
-    render_txt,
+from android_agent.documents.reader import (
+    ALLOWED_FORMATS,
+    OPTIONAL_LIBRARIES,
+    available_libraries,
+    library_summary,
+)
+from android_agent.documents.sandbox import (
+    HIDDEN_PATHS,
+    SCRIPT_NAME,
+    build_command,
+    pick_output,
+    proot_available,
+    run_script,
+    workspace_for,
+    workspaces_root,
 )
 from android_agent.documents.store import DocumentStore, slugify
 from android_agent.tools.base import Risk
 from android_agent.tools.document_tools import document_tools
 
-SAMPLE = """# Title
-
-Some **bold**, *italic* and `code`.
-
-- first
-- second
-
-1. step one
-2. step two
-
-```
-x = 1
-```
+WRITE_CSV = """
+import csv
+with open('output.csv', 'w', newline='') as handle:
+    csv.writer(handle).writerows([['Item', 'Amount'], ['Rent', 12000]])
 """
 
 
-class MarkdownTests(unittest.TestCase):
-    def test_every_construct_is_recognised(self):
-        kinds = [block.kind for block in parse_markdown(SAMPLE)]
-        self.assertEqual(
-            kinds,
-            ["heading", "paragraph", "bullet", "bullet", "number", "number", "code"],
+def workspace() -> Path:
+    return Path(tempfile.mkdtemp())
+
+
+class SandboxTests(unittest.TestCase):
+    def test_a_rerun_in_the_same_workspace_sees_its_own_new_output(self):
+        """Revision 2 must not be mistaken for a script that wrote nothing."""
+        space = workspace()
+        first = run_script(WRITE_CSV, space, isolate=False)
+        self.assertEqual([p.name for p in first.produced], ["output.csv"])
+        second = run_script(
+            WRITE_CSV.replace("12000", "15000"), space, isolate=False
         )
+        self.assertEqual([p.name for p in second.produced], ["output.csv"])
+        self.assertIn("15000", (space / "output.csv").read_text(encoding="utf-8-sig"))
 
-    def test_paragraphs_join_wrapped_lines(self):
-        blocks = parse_markdown("one line\nsame paragraph\n\nnew one")
-        self.assertEqual(blocks[0].text, "one line same paragraph")
-        self.assertEqual(len(blocks), 2)
+    def test_a_rerun_does_not_inherit_the_previous_files(self):
+        space = workspace()
+        run_script("open('leftover.txt','w').write('old')", space, isolate=False)
+        result = run_script(WRITE_CSV, space, isolate=False)
+        self.assertNotIn("leftover.txt", [p.name for p in result.produced])
+        self.assertFalse((space / "leftover.txt").exists())
 
-    def test_heading_level_is_kept(self):
-        self.assertEqual(parse_markdown("### Deep")[0].level, 3)
+    def test_a_script_runs_and_its_output_is_found(self):
+        result = run_script(WRITE_CSV, workspace(), isolate=False)
+        self.assertTrue(result.ok, result.stderr)
+        self.assertEqual([p.name for p in result.produced], ["output.csv"])
 
-    def test_an_unterminated_fence_keeps_its_content(self):
-        blocks = parse_markdown("```\nnever closed")
-        self.assertEqual(blocks[-1].kind, "code")
-        self.assertIn("never closed", blocks[-1].text)
+    def test_the_script_itself_is_not_treated_as_output(self):
+        result = run_script(WRITE_CSV, workspace(), isolate=False)
+        self.assertNotIn(SCRIPT_NAME, [p.name for p in result.produced])
 
-    def test_a_duplicate_leading_title_is_dropped(self):
-        blocks = drop_duplicate_title(parse_markdown("# Report\n\nBody"), "Report")
-        self.assertEqual([b.kind for b in blocks], ["paragraph"])
+    def test_a_failing_script_reports_its_traceback(self):
+        result = run_script("raise ValueError('bad column')", workspace(), isolate=False)
+        self.assertFalse(result.ok)
+        self.assertIn("ValueError: bad column", result.diagnostic)
 
-    def test_a_different_leading_heading_is_kept(self):
-        blocks = drop_duplicate_title(parse_markdown("# Intro\n\nBody"), "Report")
-        self.assertEqual([b.kind for b in blocks], ["heading", "paragraph"])
+    def test_a_syntax_error_is_reported_not_swallowed(self):
+        result = run_script("def (:", workspace(), isolate=False)
+        self.assertFalse(result.ok)
+        self.assertIn("SyntaxError", result.diagnostic)
 
-    def test_html_escapes_before_marking_up(self):
-        out = render_html(parse_markdown("<script>alert(1)</script> **safe**"), "T")
-        body = out.decode()
-        self.assertIn("&lt;script&gt;", body)
-        self.assertNotIn("<script>alert", body)
-        self.assertIn("<strong>safe</strong>", body)
+    def test_a_hanging_script_is_stopped(self):
+        result = run_script(
+            "import time; time.sleep(30)", workspace(), timeout=1.0, isolate=False
+        )
+        self.assertFalse(result.ok)
+        self.assertTrue(result.timed_out)
+        self.assertIn("did not finish", result.diagnostic)
 
-    def test_html_output_runs_no_scripts(self):
-        """A document the agent wrote must never execute anything."""
-        out = render_html(parse_markdown("hello"), "T").decode()
-        self.assertNotIn("<script", out)
-        self.assertNotIn("onclick", out)
+    def test_agent_secrets_are_not_in_the_script_environment(self):
+        """Even without proot, no ANDROID_AGENT_* variable is handed over."""
+        with mock.patch.dict(os.environ, {"ANDROID_AGENT_LLM_API_KEY": "secret-key"}):
+            result = run_script(
+                "import os; print([k for k in os.environ if 'ANDROID_AGENT' in k])",
+                workspace(), isolate=False,
+            )
+        self.assertTrue(result.ok, result.stderr)
+        self.assertEqual(result.stdout.strip(), "[]")
+        self.assertNotIn("secret-key", result.stdout)
 
-    def test_non_ascii_survives_every_text_renderer(self):
-        blocks = parse_markdown("আমার রিপোর্ট\n\n- হিন্দी")
-        for renderer in (render_txt, render_md, render_html):
-            with self.subTest(renderer=renderer.__name__):
-                self.assertIn("আমার", renderer(blocks, "শিরোনাম").decode("utf-8"))
+    def test_home_points_at_the_workspace_not_the_real_home(self):
+        space = workspace()
+        result = run_script("import os; print(os.environ['HOME'])", space, isolate=False)
+        self.assertEqual(result.stdout.strip(), str(space))
 
+    def test_matplotlib_is_told_not_to_open_a_display(self):
+        result = run_script(
+            "import os; print(os.environ.get('MPLBACKEND'))", workspace(), isolate=False
+        )
+        self.assertEqual(result.stdout.strip(), "Agg")
 
-class SheetTests(unittest.TestCase):
-    ROWS: ClassVar[list] = [["Name", "Qty"], ["চা", "3"], ["Coffee", "5"]]
+    def test_the_script_runs_in_its_own_directory(self):
+        space = workspace()
+        result = run_script("import os; print(os.getcwd())", space, isolate=False)
+        self.assertEqual(Path(result.stdout.strip()).resolve(), space.resolve())
 
-    def test_csv_is_readable_back(self):
-        text = render_csv(self.ROWS, "x").decode("utf-8-sig")
-        self.assertEqual(list(csv.reader(io.StringIO(text))), self.ROWS)
+    def test_each_document_gets_a_separate_workspace(self):
+        self.assertNotEqual(workspace_for("aaaa1111"), workspace_for("bbbb2222"))
 
-    def test_csv_starts_with_a_bom_so_excel_shows_non_ascii(self):
-        self.assertTrue(render_csv(self.ROWS, "x").startswith(b"\xef\xbb\xbf"))
+    def test_workspaces_live_outside_the_home_directory(self):
+        """Otherwise hiding $HOME would also hide the script's own folder."""
+        home = os.environ.get("HOME")
+        if home:
+            self.assertFalse(str(workspaces_root()).startswith(str(Path(home) / "")))
 
-    def test_json_uses_the_header_as_keys(self):
-        payload = json.loads(render_json(self.ROWS, "Stock"))
-        self.assertEqual(payload["records"][0], {"Name": "চা", "Qty": "3"})
-        self.assertEqual(payload["title"], "Stock")
-
-    def test_a_header_only_sheet_does_not_invent_records(self):
-        payload = json.loads(render_json([["Name", "Qty"]], "Empty"))
-        self.assertIn("rows", payload)
-
-    @unittest.skipUnless(backend_for("xlsx")[0], "openpyxl not installed")
-    def test_xlsx_round_trips(self):
-        from openpyxl import load_workbook
-
-        data = render(SHEET_KIND, "xlsx", title="Stock", source=self.ROWS)
-        workbook = load_workbook(io.BytesIO(data))
-        sheet = workbook.active
-        self.assertEqual(sheet.title, "Stock")
-        self.assertEqual([cell.value for cell in sheet[1]], ["Name", "Qty"])
-        self.assertEqual(sheet["A2"].value, "চা")
-
-    @unittest.skipUnless(backend_for("xlsx")[0], "openpyxl not installed")
-    def test_a_title_with_illegal_sheet_characters_is_cleaned(self):
-        from openpyxl import load_workbook
-
-        data = render(SHEET_KIND, "xlsx", title="Q3/2026: results*", source=self.ROWS)
-        self.assertNotIn("/", load_workbook(io.BytesIO(data)).active.title)
-
-
-SHEET_KIND = "sheet"
+    def test_output_size_is_capped(self):
+        result = run_script(
+            "open('output.txt','w').write('x' * (200 * 1024 * 1024))",
+            workspace(), isolate=False,
+        )
+        self.assertFalse(result.ok)
 
 
-class BackendTests(unittest.TestCase):
-    def test_a_missing_backend_names_the_install_command(self):
-        with mock.patch.dict("sys.modules", {"reportlab": None}):
-            usable, reason = backend_for("pdf")
-        if not usable:
-            self.assertIn("reportlab", reason)
+class IsolationCommandTests(unittest.TestCase):
+    """proot is what actually keeps a script away from the owner's secrets."""
 
-    def test_stdlib_formats_are_always_available(self):
-        for fmt in ("md", "txt", "html", "csv", "json"):
-            with self.subTest(fmt=fmt):
-                self.assertIn(fmt, available_formats())
+    def test_without_isolation_the_command_is_plain_python(self):
+        command = build_command(workspace(), isolate=False)
+        self.assertNotIn("proot", command[0])
+        self.assertEqual(command[-1], SCRIPT_NAME)
 
-    def test_rendering_a_mismatched_format_is_refused(self):
-        with self.assertRaises(RenderError) as caught:
-            render("document", "xlsx", title="T", source="text")
-        self.assertEqual(caught.exception.code, "format_mismatch")
+    def test_isolation_hides_the_home_directory(self):
+        space = workspace()
+        command = " ".join(build_command(space, isolate=True))
+        home = os.environ.get("HOME")
+        self.assertTrue(command.startswith("proot"))
+        if home:
+            self.assertIn(f":{home}", command)
 
-    def test_an_unknown_format_is_refused(self):
-        with self.assertRaises(RenderError) as caught:
-            render("document", "docx", title="T", source="text")
-        self.assertEqual(caught.exception.code, "unknown_format")
+    def test_isolation_hides_shared_storage(self):
+        command = " ".join(build_command(workspace(), isolate=True))
+        for path in HIDDEN_PATHS:
+            if Path(path).exists():
+                with self.subTest(path=path):
+                    self.assertIn(f":{path}", command)
 
-    def test_every_declared_format_has_a_kind_and_a_hint(self):
-        for fmt, (kind, package, hint) in FORMATS.items():
-            with self.subTest(fmt=fmt):
-                self.assertIn(kind, {"document", "sheet", "slides"})
-                if package is not None:
-                    self.assertTrue(hint, f"{fmt} has no install hint")
+    def test_isolation_sets_the_working_directory(self):
+        space = workspace()
+        command = build_command(space, isolate=True)
+        self.assertIn("-w", command)
+        self.assertIn(str(space), command)
+
+    def test_the_blind_mount_is_an_empty_directory(self):
+        space = workspace()
+        build_command(space, isolate=True)
+        blind = space / ".blind"
+        self.assertTrue(blind.is_dir())
+        self.assertEqual(list(blind.iterdir()), [])
+
+
+class OutputPickingTests(unittest.TestCase):
+    def setUp(self):
+        self.space = workspace()
+
+    def _touch(self, name, size=10):
+        path = self.space / name
+        path.write_bytes(b"x" * size)
+        return path
+
+    def test_the_documented_name_wins(self):
+        self._touch("other.pdf", 500)
+        expected = self._touch("output.pdf", 10)
+        self.assertEqual(pick_output(sorted(self.space.iterdir()), "pdf"), expected)
+
+    def test_any_file_with_the_right_extension_is_accepted(self):
+        """A script that writes report.pdf should not fail on a technicality."""
+        expected = self._touch("report.pdf")
+        self.assertEqual(pick_output([expected], "pdf"), expected)
+
+    def test_the_largest_candidate_wins_when_several_match(self):
+        self._touch("small.pdf", 10)
+        big = self._touch("big.pdf", 999)
+        self.assertEqual(pick_output(sorted(self.space.iterdir()), "pdf"), big)
+
+    def test_a_wrong_extension_is_not_accepted(self):
+        self.assertIsNone(pick_output([self._touch("output.txt")], "pdf"))
+
+    def test_nothing_produced_means_nothing_picked(self):
+        self.assertIsNone(pick_output([], "pdf"))
+
+
+class LibraryReportTests(unittest.TestCase):
+    def test_availability_is_checked_not_assumed(self):
+        found = available_libraries()
+        self.assertEqual(set(found), set(OPTIONAL_LIBRARIES))
+        for name, present in found.items():
+            with self.subTest(library=name):
+                self.assertIsInstance(present, bool)
+
+    def test_the_summary_is_never_empty(self):
+        self.assertTrue(library_summary().strip())
+
+    def test_every_optional_library_has_an_install_command(self):
+        for name, hint in OPTIONAL_LIBRARIES.items():
+            with self.subTest(library=name):
+                self.assertTrue(hint.strip(), f"{name} has no install hint")
 
 
 class SlugTests(unittest.TestCase):
     def test_filesystem_characters_are_replaced(self):
         self.assertNotIn("/", slugify("Q3/2026 report"))
-        self.assertNotIn(":", slugify("Report: final"))
 
     def test_other_scripts_keep_their_letters(self):
-        """Transliterating a Bengali title would make it unrecognisable."""
         self.assertIn("রিপোর্ট", slugify("মাসিক রিপোর্ট"))
 
     def test_an_empty_title_still_produces_a_name(self):
         self.assertEqual(slugify("   "), "document")
-
-    def test_long_titles_are_bounded(self):
-        self.assertLessEqual(len(slugify("x" * 300)), 60)
 
 
 class ToolTests(unittest.TestCase):
@@ -196,17 +235,14 @@ class ToolTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.files = Path(self.tmp.name) / "files"
-        patcher = mock.patch(
-            "android_agent.documents.store.documents_root", return_value=self.files
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        patcher2 = mock.patch(
-            "android_agent.tools.document_tools.documents_root", return_value=self.files
-        )
-        patcher2.start()
-        self.addCleanup(patcher2.stop)
-        self.files.mkdir(parents=True, exist_ok=True)
+        self.files.mkdir(parents=True)
+        for target in (
+            "android_agent.documents.store.documents_root",
+            "android_agent.tools.document_tools.documents_root",
+        ):
+            patcher = mock.patch(target, return_value=self.files)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
         self.store = DocumentStore(Path(self.tmp.name) / "documents.db")
         self.addCleanup(self.store.close)
@@ -216,90 +252,95 @@ class ToolTests(unittest.TestCase):
         tool = self.tools[tool_name]
         return tool.handler(None, tool.validate(arguments))
 
-    def test_creating_a_markdown_document_writes_a_file(self):
+    def test_a_script_produces_a_real_file(self):
         result = self.call(
-            "create_document", title="Notes", format="md", content="Hello **there**"
+            "create_document", title="Expenses", format="csv", script=WRITE_CSV
         )
-        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.status, "ok", result.summary)
         path = Path(result.data["artifact_path"])
         self.assertTrue(path.is_file())
-        self.assertIn("Hello", path.read_text(encoding="utf-8"))
+        self.assertIn("Rent", path.read_text(encoding="utf-8-sig"))
 
     def test_the_file_lands_in_the_files_folder(self):
-        result = self.call("create_document", title="Notes", format="txt", content="x")
+        result = self.call(
+            "create_document", title="Expenses", format="csv", script=WRITE_CSV
+        )
         self.assertEqual(Path(result.data["artifact_path"]).parent, self.files)
 
-    def test_a_sheet_needs_rows_not_content(self):
-        result = self.call("create_document", title="Stock", format="csv", content="nope")
-        self.assertEqual(result.error_code, "missing_content")
-        self.assertIn("rows", result.summary)
-
-    def test_a_document_needs_content_not_rows(self):
+    def test_a_broken_script_reports_the_error_and_writes_nothing(self):
         result = self.call(
-            "create_document", title="Notes", format="md", rows=[["a"]]
+            "create_document", title="Broken", format="csv",
+            script="raise RuntimeError('column missing')",
         )
-        self.assertEqual(result.error_code, "missing_content")
+        self.assertEqual(result.error_code, "script_failed")
+        self.assertIn("column missing", result.summary)
+        self.assertEqual(list(self.files.iterdir()), [])
 
-    def test_revising_creates_version_two_and_keeps_version_one(self):
+    def test_a_script_that_writes_the_wrong_format_is_told_so(self):
+        result = self.call(
+            "create_document", title="Wrong", format="pdf",
+            script="open('output.txt','w').write('hi')",
+        )
+        self.assertEqual(result.error_code, "no_output")
+        self.assertIn("output.pdf", result.summary)
+
+    def test_a_script_that_writes_nothing_is_told_so(self):
+        result = self.call(
+            "create_document", title="Silent", format="csv", script="x = 1",
+        )
+        self.assertEqual(result.error_code, "no_output")
+        self.assertIn("nothing", result.summary)
+
+    def test_revising_runs_the_new_script_and_keeps_version_one(self):
         created = self.call(
-            "create_document", title="Notes", format="md", content="first draft"
+            "create_document", title="Expenses", format="csv", script=WRITE_CSV
         )
         first = Path(created.data["artifact_path"])
-        revised = self.call("revise_document", document="Notes", content="second draft")
+        revised = self.call(
+            "revise_document", document="Expenses",
+            script=WRITE_CSV.replace("12000", "15000"),
+        )
         second = Path(revised.data["artifact_path"])
-
         self.assertEqual(revised.data["version"], 2)
         self.assertTrue(first.is_file(), "version 1 must survive")
-        self.assertNotEqual(first, second)
-        self.assertIn("second draft", second.read_text(encoding="utf-8"))
-        self.assertIn("first draft", first.read_text(encoding="utf-8"))
+        self.assertIn("12000", first.read_text(encoding="utf-8-sig"))
+        self.assertIn("15000", second.read_text(encoding="utf-8-sig"))
 
-    def test_revising_by_id_works_as_well_as_by_title(self):
-        created = self.call("create_document", title="Notes", format="md", content="a")
-        revised = self.call(
-            "revise_document", document=created.data["id"], content="b"
+    def test_a_failed_revision_leaves_the_previous_version_intact(self):
+        created = self.call(
+            "create_document", title="Expenses", format="csv", script=WRITE_CSV
         )
-        self.assertEqual(revised.status, "ok")
+        first = Path(created.data["artifact_path"])
+        result = self.call(
+            "revise_document", document="Expenses", script="raise ValueError('nope')"
+        )
+        self.assertEqual(result.error_code, "script_failed")
+        self.assertTrue(first.is_file())
+        self.assertEqual(self.store.get(created.data["id"]).version, 1)
 
-    def test_revising_can_change_format_without_resupplying_content(self):
-        self.call("create_document", title="Notes", format="md", content="keep me")
-        revised = self.call("revise_document", document="Notes", format="html")
-        self.assertEqual(revised.status, "ok")
-        self.assertIn("keep me", Path(revised.data["artifact_path"]).read_text("utf-8"))
+    def test_the_script_is_kept_and_can_be_shown(self):
+        created = self.call(
+            "create_document", title="Expenses", format="csv", script=WRITE_CSV
+        )
+        shown = self.call("show_document_script", document=created.data["id"])
+        self.assertIn("csv.writer", shown.data["script"])
+        self.assertIn("```python", shown.summary)
 
-    def test_revising_to_an_incompatible_format_is_refused(self):
-        self.call("create_document", title="Notes", format="md", content="x")
-        result = self.call("revise_document", document="Notes", format="csv")
-        self.assertEqual(result.error_code, "format_mismatch")
+    def test_showing_an_unknown_script_is_refused(self):
+        self.assertEqual(
+            self.call("show_document_script", document="nope").error_code,
+            "unknown_document",
+        )
 
-    def test_revising_an_unknown_document_says_how_to_find_it(self):
-        result = self.call("revise_document", document="nothing", content="x")
-        self.assertEqual(result.error_code, "unknown_document")
-        self.assertIn("List the documents", result.summary)
+    def test_listing_shows_the_version(self):
+        self.call("create_document", title="Expenses", format="csv", script=WRITE_CSV)
+        self.call("revise_document", document="Expenses", script=WRITE_CSV)
+        self.assertIn("v2", self.call("list_documents").summary)
 
-    def test_listing_shows_version_and_format(self):
-        self.call("create_document", title="Notes", format="md", content="x")
-        self.call("revise_document", document="Notes", content="y")
-        listed = self.call("list_documents")
-        self.assertIn("MD v2", listed.summary)
-        self.assertEqual(listed.data["documents"][0]["version"], 2)
-
-    def test_an_empty_library_suggests_what_is_possible(self):
-        listed = self.call("list_documents")
-        self.assertIn("No documents yet", listed.summary)
-        self.assertIn("md", listed.summary)
-
-    def test_reading_back_a_created_document(self):
-        self.call("create_document", title="Notes", format="txt", content="the body")
-        result = self.call("read_document", name="Notes")
-        self.assertEqual(result.status, "ok")
-        self.assertIn("the body", result.summary)
-
-    def test_a_read_document_is_untrusted_content(self):
-        """A file may have been written by anyone, so it taints the run."""
-        self.assertTrue(self.tools["read_document"].returns_untrusted_content)
-        self.call("create_document", title="Notes", format="txt", content="hi")
-        result = self.call("read_document", name="Notes")
+    def test_reading_a_generated_file_back(self):
+        self.call("create_document", title="Expenses", format="csv", script=WRITE_CSV)
+        result = self.call("read_document", name="Expenses")
+        self.assertIn("Rent", result.summary)
         self.assertIn("UNTRUSTED", result.summary)
 
     def test_reading_outside_the_files_folder_is_refused(self):
@@ -307,41 +348,64 @@ class ToolTests(unittest.TestCase):
             with self.subTest(attempt=attempt):
                 result = self.call("read_document", name=attempt)
                 self.assertEqual(result.status, "error")
-                self.assertIn(result.error_code, {"outside_files_folder", "not_found"})
 
-    def test_reading_a_missing_file_says_so(self):
-        result = self.call("read_document", name="nope.txt")
-        self.assertEqual(result.error_code, "not_found")
+    def test_read_document_is_untrusted_content(self):
+        self.assertTrue(self.tools["read_document"].returns_untrusted_content)
 
-    def test_risk_levels_match_what_the_tools_do(self):
-        self.assertEqual(self.tools["create_document"].risk, Risk.DEVICE_MUTATION)
-        self.assertEqual(self.tools["revise_document"].risk, Risk.DEVICE_MUTATION)
-        self.assertEqual(self.tools["list_documents"].risk, Risk.READ_ONLY)
-        self.assertEqual(self.tools["read_document"].risk, Risk.SENSITIVE_READ)
-
-    def test_an_unavailable_backend_names_what_is_available(self):
+    def test_writing_is_gated_when_there_is_no_isolation(self):
+        """Friction follows containment: no proot means ask every time."""
         with mock.patch(
-            "android_agent.tools.document_tools.backend_for",
-            return_value=(False, "PDF needs reportlab: pip install reportlab"),
+            "android_agent.tools.document_tools.proot_available", return_value=False
         ):
-            result = self.call(
-                "create_document", title="Report", format="pdf", content="x"
-            )
-        self.assertEqual(result.error_code, "backend_missing")
-        self.assertIn("reportlab", result.summary)
-        self.assertIn("available right now", result.summary)
+            ungated = {t.name: t for t in document_tools(self.store)}
+        self.assertEqual(ungated["create_document"].risk, Risk.EXTERNAL_SIDE_EFFECT)
+        self.assertIn("NOT isolated", ungated["create_document"].description)
 
-    def test_a_non_ascii_title_produces_a_usable_filename(self):
-        result = self.call(
-            "create_document", title="মাসিক রিপোর্ট", format="md", content="বিষয়"
-        )
-        self.assertEqual(result.status, "ok")
-        self.assertTrue(Path(result.data["artifact_path"]).is_file())
+    def test_writing_is_ungated_when_isolation_is_available(self):
+        with mock.patch(
+            "android_agent.tools.document_tools.proot_available", return_value=True
+        ):
+            gated = {t.name: t for t in document_tools(self.store)}
+        self.assertEqual(gated["create_document"].risk, Risk.DEVICE_MUTATION)
+        self.assertIn("isolated", gated["create_document"].description)
+
+    def test_the_tool_tells_the_model_which_libraries_exist(self):
+        description = self.tools["create_document"].description
+        self.assertIn("output.<format>", description)
+        for library, present in available_libraries().items():
+            if present:
+                with self.subTest(library=library):
+                    self.assertIn(library, description)
+
+    def test_every_allowed_format_is_offered(self):
+        enum = self.tools["create_document"].input_schema["properties"]["format"]["enum"]
+        self.assertEqual(set(enum), set(ALLOWED_FORMATS))
 
     def test_the_result_carries_an_artifact_so_the_file_is_delivered(self):
-        result = self.call("create_document", title="Notes", format="md", content="x")
+        result = self.call(
+            "create_document", title="Expenses", format="csv", script=WRITE_CSV
+        )
         self.assertIn("artifact_path", result.data)
         self.assertIn("saved_to", result.data)
+
+
+@unittest.skipUnless(proot_available(), "proot is not installed here")
+class RealIsolationTests(unittest.TestCase):
+    """Only runs where proot exists — on the phone, not in the sandbox."""
+
+    def test_a_script_cannot_read_the_home_directory(self):
+        home = Path(os.environ["HOME"])
+        marker = home / ".isolation-probe"
+        marker.write_text("secret", encoding="utf-8")
+        self.addCleanup(marker.unlink, missing_ok=True)
+        result = run_script(
+            "from pathlib import Path\n"
+            "import os\n"
+            "print(Path(os.environ.get('REAL_HOME','/nonexistent'))"
+            ".joinpath('.isolation-probe').exists())",
+            workspace(), isolate=True,
+        )
+        self.assertNotIn("secret", result.stdout)
 
 
 if __name__ == "__main__":

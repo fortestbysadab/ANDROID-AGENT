@@ -51,8 +51,8 @@ class SkillRouterTests(unittest.TestCase):
         guidance = SkillRouter.bundled().instructions_for("make me a pdf report")
         lowered = guidance.lower()
         self.assertIn("skill: documents", lowered)
-        self.assertRegex(lowered, r"never try to patch")
-        self.assertRegex(lowered, r"full corrected source")
+        self.assertRegex(lowered, r"you write a \*\*python script\*\*")
+        self.assertRegex(lowered, r"complete corrected script")
 
     def test_the_documents_skill_loads_for_non_english_requests(self):
         router = SkillRouter.bundled()

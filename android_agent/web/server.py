@@ -598,10 +598,22 @@ class Handler(BaseHTTPRequestHandler):
     def _artifacts(self, results) -> list[dict[str, object]]:
         artifacts = []
         for result in results:
+            # Media tools report a name and kind; documents report only the
+            # path they wrote. Both are files the owner just made and expects
+            # to be able to open, so both become artifacts.
             name = result.data.get("artifact_name")
             kind = result.data.get("media_kind")
-            if isinstance(name, str) and isinstance(kind, str):
-                artifacts.append({"name": name, "kind": kind})
+            path = result.data.get("artifact_path")
+            if not isinstance(name, str) and isinstance(path, str):
+                name = Path(path).name
+            if isinstance(name, str) and name:
+                suffix = Path(name).suffix.lower().lstrip(".")
+                artifacts.append({
+                    "name": name,
+                    "kind": kind if isinstance(kind, str) else "document",
+                    "format": suffix,
+                    "previewable": suffix in {"png", "jpg", "jpeg", "gif", "webp"},
+                })
             latitude = result.data.get("latitude")
             longitude = result.data.get("longitude")
             if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):

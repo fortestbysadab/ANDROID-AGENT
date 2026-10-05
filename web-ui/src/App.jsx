@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from './api.js';
+import { api, downloadUrl } from './api.js';
 import { FilesScreen, ScheduleScreen, ToolsScreen } from './screens.jsx';
 import { RichText, when } from './text.jsx';
 import {
@@ -107,6 +107,27 @@ function MapCard({ artifact }) {
   );
 }
 
+/* A file the agent just made. Clicking the name opens it; images preview
+   in place, because a screenshot you have to download to look at is barely
+   better than being told the filename. */
+function FileCard({ artifact }) {
+  const href = downloadUrl(artifact.name);
+  return (
+    <div className="filecard">
+      <a className="filecard-head" href={href} target="_blank" rel="noopener noreferrer">
+        <span className="filechip">{(artifact.format || 'file').toUpperCase()}</span>
+        <span className="filename">{artifact.name}</span>
+        <span className="opens">Open</span>
+      </a>
+      {artifact.previewable && (
+        <a href={href} target="_blank" rel="noopener noreferrer">
+          <img className="filepreview" src={href} alt={artifact.name} loading="lazy" />
+        </a>
+      )}
+    </div>
+  );
+}
+
 function Message({ message, onApprove }) {
   if (message.role === 'approval') {
     const args = Object.entries(message.arguments || {});
@@ -191,21 +212,9 @@ function Message({ message, onApprove }) {
           {maps.map((artifact, index) => (
             <MapCard key={index} artifact={artifact} />
           ))}
-          {others.length > 0 && (
-            <div className="row" style={{ marginBlockStart: 10 }}>
-              {others.map((artifact, index) => (
-                <a
-                  key={index}
-                  className="tag"
-                  href={`/api/media/file?name=${encodeURIComponent(artifact.name)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {artifact.name}
-                </a>
-              ))}
-            </div>
-          )}
+          {others.map((artifact, index) => (
+            <FileCard key={index} artifact={artifact} />
+          ))}
         </div>
       </div>
     </div>
@@ -426,6 +435,28 @@ export default function App() {
             </button>
           ))}
         </nav>
+        {state.conversations?.length > 0 && (
+          <div className="history scroll">
+            <div className="histhead">Recent</div>
+            {state.conversations.map((chat) => (
+              <button
+                key={chat.id}
+                type="button"
+                className={`histitem${chat.current ? ' on' : ''}`}
+                title={chat.title}
+                onClick={async () => {
+                  try {
+                    setState((await api.openChat(chat.id)).state);
+                    setScreen('chat');
+                    setDrawer(false);
+                  } catch (error) { notify(error.message); }
+                }}
+              >
+                {chat.title}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="sidefoot">
           <div className="themes" role="group" aria-label="Theme">
             {['light', 'system', 'dark'].map((name) => (

@@ -61,7 +61,11 @@ SEND_SCHEMA = {
             "description": "One recipient address, exactly as the owner gave it.",
         },
         "subject": {"type": "string", "minLength": 1, "maxLength": 200},
-        "body": {"type": "string", "minLength": 1, "maxLength": 5000},
+        "body": {
+            "type": "string", "minLength": 1, "maxLength": 5000,
+            "description": "The message as it should read. Use real line "
+                           "breaks for paragraphs, not the characters \\n.",
+        },
     },
     "required": ["to", "subject", "body"],
     "additionalProperties": False,
@@ -79,6 +83,21 @@ REPLY_SCHEMA = {
     "required": ["message_id", "body"],
     "additionalProperties": False,
 }
+
+
+#: Models frequently emit a body containing the two characters backslash-n
+#: instead of a newline, because they are writing what looks like a JSON
+#: string. Plain text email has no escape sequences, so those characters
+#: arrive literally and the message reads as one long line full of "\n".
+#: Nothing legitimate needs a literal backslash-n in an email body, so they
+#: are converted rather than guessed at.
+_ESCAPES = (("\\r\\n", "\n"), ("\\n", "\n"), ("\\r", "\n"), ("\\t", "\t"))
+
+
+def unescape_body(text: str) -> str:
+    for written, meant in _ESCAPES:
+        text = text.replace(written, meant)
+    return text
 
 
 def _failure(exc: ChannelError) -> ToolResult:
@@ -134,8 +153,8 @@ def email_tools(channel) -> list[ToolSpec]:
         try:
             sent_id = channel.send(
                 to=str(arguments["to"]),
-                subject=str(arguments["subject"]),
-                body=str(arguments["body"]),
+                subject=unescape_body(str(arguments["subject"])),
+                body=unescape_body(str(arguments["body"])),
                 in_reply_to=None,
             )
         except ChannelError as exc:
@@ -158,7 +177,7 @@ def email_tools(channel) -> list[ToolSpec]:
             sent_id = channel.send(
                 to=original.sender,
                 subject=subject,
-                body=str(arguments["body"]),
+                body=unescape_body(str(arguments["body"])),
                 in_reply_to=original.extra.get("rfc_message_id") or None,
             )
         except ChannelError as exc:

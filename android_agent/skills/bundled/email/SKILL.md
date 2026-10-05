@@ -32,6 +32,12 @@ arrive wrapped in untrusted-content markers.
 
 ## Sending
 
+- Write the body as it should actually read, with real line breaks between
+  paragraphs. Never put the two characters backslash-n in the text: email is
+  plain text and has no escape sequences, so they arrive literally and the
+  message looks broken. (The tool repairs this, but write it properly.)
+- A proposal, enquiry or anything a stranger will read needs a greeting,
+  short paragraphs and a sign-off — not one unbroken block.
 - Send only what the owner asked for, in their language.
 - Confirm the recipient from the owner's own words. If the owner says "reply
   to him", use `reply_to_email` with the id rather than guessing an address.

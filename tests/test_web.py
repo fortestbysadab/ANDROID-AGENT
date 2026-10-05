@@ -592,6 +592,27 @@ class LocationArtifactTests(WebTestCase):
 
         return Handler._artifacts(handler, [ToolResult.ok("Location.", data)])
 
+    def test_a_created_document_becomes_a_clickable_artifact(self):
+        """Documents reported only a path, so they never appeared in chat."""
+        artifacts = self._artifacts(
+            {"artifact_path": "/sdcard/AndroidAgent/files/Report.pdf", "version": 1}
+        )
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["name"], "Report.pdf")
+        self.assertEqual(artifacts[0]["kind"], "document")
+        self.assertEqual(artifacts[0]["format"], "pdf")
+        self.assertFalse(artifacts[0]["previewable"])
+
+    def test_a_screenshot_is_marked_previewable(self):
+        artifacts = self._artifacts(
+            {"artifact_name": "shot.png", "media_kind": "screenshot"}
+        )
+        self.assertEqual(artifacts[0]["kind"], "screenshot")
+        self.assertTrue(artifacts[0]["previewable"])
+
+    def test_a_result_with_no_file_produces_no_artifact(self):
+        self.assertEqual(self._artifacts({"percentage": 87}), [])
+
     def test_a_location_result_carries_numeric_coordinates(self):
         artifacts = self._artifacts({"latitude": 22.36464, "longitude": 87.9995})
         self.assertEqual(len(artifacts), 1)

@@ -204,6 +204,20 @@ class GoogleWorkflowTests(unittest.TestCase):
         )
         self.assertIn("Wikipedia", outcome.summary)
 
+    def test_the_reply_names_the_browser_that_handled_it(self):
+        """Android routes the URL to the default browser, not the Google app."""
+        backend = FakeBackend([screen("India - Wikipedia page", package="com.android.chrome")])
+        run = WorkflowRun(backend, Limits(settle_seconds=0))
+        outcome = WORKFLOWS["google_search"].run(run, {"query": "India"})
+        self.assertIn("Chrome", outcome.summary)
+        self.assertEqual(outcome.data["browser"], "com.android.chrome")
+
+    def test_an_unknown_browser_is_named_by_its_package(self):
+        backend = FakeBackend([screen("India results here", package="com.some.browser")])
+        run = WorkflowRun(backend, Limits(settle_seconds=0))
+        outcome = WORKFLOWS["google_search"].run(run, {"query": "India"})
+        self.assertIn("com.some.browser", outcome.summary)
+
     def test_the_query_is_url_encoded_not_interpolated(self):
         backend = FakeBackend([screen("tea & coffee results", package="com.android.chrome")])
         run = WorkflowRun(backend, Limits(settle_seconds=0))

@@ -78,15 +78,36 @@ def google_search(run: WorkflowRun, parameters: dict[str, Any]) -> WorkflowResul
         element.label for element in snapshot.elements
         if element.clickable and len(element.label) > 18
     ][:6]
+    # Name the app that handled it. Android routes the search URL to the
+    # default browser, so the owner sees Chrome rather than the Google app;
+    # saying so beats letting them wonder whether it went somewhere odd.
+    browser = _browser_name(snapshot.package)
     summary = (
-        f"Opened Google for {query!r}. Visible on screen: "
+        f"Searched Google for {query!r} in {browser}. Visible on screen: "
         + ("; ".join(headlines) if headlines else snapshot.visible_text(300))
     )
     return WorkflowResult(
         True, summary,
-        {"query": query, "url": url, "headlines": headlines},
+        {"query": query, "url": url, "headlines": headlines, "browser": snapshot.package},
         steps=list(run.steps),
     )
+
+
+#: Package name to something a person would say.
+_BROWSERS = {
+    "com.android.chrome": "Chrome",
+    "com.chrome.beta": "Chrome Beta",
+    "org.mozilla.firefox": "Firefox",
+    "com.brave.browser": "Brave",
+    "com.microsoft.emmx": "Edge",
+    "com.opera.browser": "Opera",
+    "com.sec.android.app.sbrowser": "Samsung Internet",
+    "com.duckduckgo.mobile.android": "DuckDuckGo",
+}
+
+
+def _browser_name(package: str) -> str:
+    return _BROWSERS.get(package, package or "the default browser")
 
 
 # ------------------------------------------------------------- instagram

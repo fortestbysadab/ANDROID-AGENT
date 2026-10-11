@@ -21,6 +21,7 @@ from typing import Any
 from android_agent.agent.runtime import AgentRuntime
 from android_agent.agent.session import SqliteSessionStore
 from android_agent.approvals.store import InMemoryApprovalStore
+from android_agent.automation import AdbBackend
 from android_agent.channels import GmailChannel
 from android_agent.config import Settings
 from android_agent.documents import DocumentStore
@@ -137,6 +138,10 @@ def build_application(
         email_channel=email_channel,
         document_store=document_store,
         search_settings=settings if settings.search_enabled else None,
+        # App automation uses the ADB connection that already exists. A
+        # companion-app backend can replace this behind the same protocol
+        # without anything above it changing.
+        automation_backend=AdbBackend(),
     )
     if settings.search_enabled:
         logger.info("Web search enabled via %s", settings.search_provider)

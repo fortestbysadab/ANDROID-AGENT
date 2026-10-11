@@ -232,62 +232,53 @@ dedicated mailbox, app password over OAuth, bodies may reach the model.
 - [ ] Inbox summary as a scheduled task, verified end to end on-device
 - [ ] On-device verification with a real mailbox (never yet run against Gmail)
 
-## Phase 9 — App-level automation `[ ]` DEFERRED (owner, 2026-10-04)
+## Phase 9 — App automation `[-]`
 
-**Deferred at the owner's request**, to avoid building an Android APK.
-Recorded for accuracy: **stage 1 needs no APK** — `uiautomator dump` runs
-over the wireless ADB already in use. Only stage 2 requires an installed
-app. If this is picked up again, stage 1 is unblocked and needs no new
-permission.
+Implements the owner's hybrid proposal. Phase 0 reconnaissance changed one
+decision: **no Android SDK, Gradle or Kotlin compiler is available here, and
+Termux cannot realistically build an APK either**, so the companion app of
+the proposal's §3.2 is not buildable by either party today. The proposal
+anticipates this — "choose and document a secure transport after inspecting
+the actual deployment constraints" — and `uiautomator dump` over the
+existing ADB returns the same accessibility node tree a service would.
 
-Owner chose structured perception (accessibility-style). Staged after
-research: stage 1 gets the same node tree through existing ADB; stage 2 adds
-the accessibility service once stage 1 shows what is missing. Design in
-ARCHITECTURE.md § App-level automation.
+So the backend is abstracted and the ADB one ships now. A companion backend
+can be added behind the identical protocol later, buying two things ADB
+cannot: surviving a reboot without re-enabling debugging, and event-driven
+waits.
 
-### Stage 1 — structured screen reading over ADB
+### Done
+- [x] `automation/models.py` — snapshot-scoped element references, 13 stable
+      error codes, bounded node text
+- [x] Element ids are globally unique. A test caught the original
+      index-based scheme silently resolving a stale `e0` against whatever
+      now sat at that index
+- [x] `automation/backend.py` — `Backend` protocol, `AdbBackend`
+      (uiautomator dump to a file then read back; `/dev/tty` truncates),
+      `FakeBackend` for tests. Untrusted XML is size-capped and DTDs refused
+- [x] `automation/runtime.py` — deadline and action budget, settle/verify
+      loop, ambiguity refusal, login and challenge detection
+- [x] `automation/workflows.py` — allowlisted `google_search` and
+      `instagram_profile`, both read-only
+- [x] `tools/app_tools.py` — `run_app_workflow` (RAW_CONTROL) and
+      `read_app_screen` (SENSITIVE_READ). No tap-a-coordinate tool exists,
+      and a test asserts the tool set stays exactly these two
+- [x] Screen content taints the run, like email and search
+- [x] The model cannot supply a package, URL or coordinate: the schema
+      rejects them and tests prove it
+- [x] Instagram counts are reported as displayed; `1.2K` is never converted
+- [x] app-automation skill, with Hindi and Bengali triggers
+- [x] 39 tests, mutation-checked against accepting stale references, taking
+      the first of an ambiguous match, ignoring login screens, opening a
+      near-miss handle, and adding a generic tap tool
 
-- [ ] `read_screen` tool — `uiautomator dump` to a file, read back, parse
-      - Files: `android_agent/tools/screen.py`, `android_agent/ui/tree.py`
-      - Notes: dump to `/data/local/tmp/ui.xml` then `cat`; `/dev/tty` is
-        intermittently empty or truncated. Retry once on "could not get idle
-        state", then report rather than act blind.
-      - Risk: `sensitive_read`, `returns_untrusted_content=True`
-      - Acceptance: returns a compact element list, not raw XML; invisible
-        and off-screen nodes filtered out
-- [ ] Element matching by `resource-id` > `content-desc` > `text`
-      - Acceptance: a workflow keyed on `resource-id` survives switching the
-        phone's language; text matching is Unicode-aware
-- [ ] `tap_element` / `type_into_element` — act on an element reference, never
-      a model-supplied coordinate
-      - Acceptance: the model cannot tap something that was not in the last
-        screen read
-- [ ] Verify-after-act: re-read and confirm the expected change
-      - Acceptance: an unexpected screen aborts and is named in the report
-- [ ] Step budget per workflow, with a clear abort reason
-- [ ] Stored workflow recipes (reviewable before a scheduled run uses one)
-- [ ] Wire into scheduling so a recipe can run on a timer
-- [ ] Tests against recorded XML dumps from the real device, including a
-      dialog-overlay screen and a mid-animation failure
-
-### Stage 2 — accessibility service `[!]` blocked on Open Question 10
-
-Only worth building once stage 1 has proven its limits.
-
-- [ ] Decide after stage 1: is re-enabling ADB after reboot, or the absence
-      of event triggers, actually blocking real use?
-- [ ] Minimal Android app exposing the node tree and gesture injection
-      (`BIND_ACCESSIBILITY_SERVICE` is signature-level; it cannot live in
-      Termux and must be enabled by hand in Settings)
-- [ ] Decide the Termux ↔ service interface
-- [ ] Document exactly what the grant exposes before asking for it
-
-### Blocked on the owner
-
-- [ ] **Name two or three real workflows** `[!]` Open Question 9. The design
-      changes materially: messaging needs text entry and a recipient check,
-      a bill payment needs reading a confirmation back, data entry needs
-      scrolling.
+### Remaining
+- [ ] Device acceptance: the ADB backend has never run against a real
+      screen. §9 of the proposal lists the manual checks
+- [ ] Instagram selectors are a best guess at the current UI and will need
+      correcting against a real dump
+- [ ] `[!]` Companion app (proposal §3.2) — blocked on a build environment.
+      Needs the Android SDK and Gradle on a machine that has them
 
 ---
 

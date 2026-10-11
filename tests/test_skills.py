@@ -31,6 +31,7 @@ class SkillRouterTests(unittest.TestCase):
                 "sensitive-data",
                 "email",
                 "documents",
+                "app-automation",
             },
         )
 

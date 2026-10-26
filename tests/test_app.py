@@ -9,6 +9,8 @@ started from.
 
 from __future__ import annotations
 
+import os
+import pathlib
 import tempfile
 import unittest
 from unittest import mock
@@ -201,3 +203,38 @@ class CommandLineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompanionCommandTests(unittest.TestCase):
+    """The companion check builds no Settings, so it must read .env itself."""
+
+    def test_the_pairing_token_is_read_from_a_dotenv_file(self):
+        captured = {}
+
+        class SpyBackend:
+            def __init__(self):
+                captured["token"] = os.environ.get("ANDROID_AGENT_COMPANION_TOKEN")
+
+            def available(self):
+                return False, "stopped here on purpose"
+
+        with tempfile.TemporaryDirectory() as folder:
+            pathlib.Path(folder, ".env").write_text(
+                "ANDROID_AGENT_COMPANION_TOKEN=from-the-file\n", encoding="utf-8"
+            )
+            previous = os.getcwd()
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key != "ANDROID_AGENT_COMPANION_TOKEN"
+            }
+            try:
+                os.chdir(folder)
+                with mock.patch.dict(os.environ, environment, clear=True), mock.patch(
+                    "android_agent.automation.CompanionBackend", SpyBackend
+                ):
+                    cli.run_companion()
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(captured["token"], "from-the-file")

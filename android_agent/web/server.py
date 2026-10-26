@@ -29,7 +29,6 @@ from urllib.parse import parse_qs, urlparse
 from android_agent.agent.runtime import RunStatus
 from android_agent.agent.session import SqliteSessionStore
 from android_agent.tools.media import MEDIA_KINDS, media_root, storage_advice
-from android_agent.web import pwa
 from android_agent.web.archive import ChatArchive, new_conversation_id
 from android_agent.web.security import AuthManager
 
@@ -175,10 +174,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; img-src 'self' data:; media-src 'self'; "
-            "style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; "
-            # Without these two the manifest and the service worker are
-            # blocked by default-src and the app is simply not installable.
-            "manifest-src 'self'; worker-src 'self'",
+            "style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
         )
         self.send_header("Cache-Control", "no-store")
         for key, value in (extra or {}).items():
@@ -284,37 +280,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"UI missing", "text/plain")
                 return
             self._send(HTTPStatus.OK, body, "text/html; charset=utf-8")
-            return
-
-        if path == "/manifest.webmanifest":
-            self._send(
-                HTTPStatus.OK,
-                pwa.MANIFEST_BYTES,
-                "application/manifest+json; charset=utf-8",
-            )
-            return
-
-        if path == "/sw.js":
-            # Scope is the whole origin, which the browser only allows when
-            # the worker is served from the root.
-            self._send(
-                HTTPStatus.OK,
-                pwa.SERVICE_WORKER_BYTES,
-                "text/javascript; charset=utf-8",
-                {"Service-Worker-Allowed": "/"},
-            )
-            return
-
-        if path.startswith("/static/"):
-            asset = pwa.read_static(path[len("/static/"):])
-            if asset is None:
-                self._send(HTTPStatus.NOT_FOUND, b"Not found", "text/plain")
-                return
-            body, content_type = asset
-            # Icons are the one thing here that is neither private nor
-            # changing, so they may be cached.
-            self._send(HTTPStatus.OK, body, content_type,
-                       {"Cache-Control": "public, max-age=86400"})
             return
 
         if path == "/api/state":

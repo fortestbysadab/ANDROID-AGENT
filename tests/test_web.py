@@ -28,6 +28,7 @@ from android_agent.observability.audit import MemoryAuditSink
 from android_agent.policy.engine import DefaultPolicy
 from android_agent.tools.base import Risk, ToolResult, ToolSpec
 from android_agent.tools.registry import ToolRegistry
+from android_agent.web import pwa
 from android_agent.web.archive import ChatArchive
 from android_agent.web.security import AuthManager, WebConfigError, validate_token
 from android_agent.web.server import COOKIE_NAME, CSRF_HEADER, UI_PATH, WebApp, make_server
@@ -945,3 +946,117 @@ class StaticTests(WebTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallableTests(WebTestCase):
+    """What Android needs before it will offer "Install app".
+
+    Chrome checks four things: a manifest it can read, a name, a 192px and
+    a 512px icon, and a service worker with a fetch handler. All of them
+    are fetched before anyone signs in, so none may sit behind the session.
+    """
+
+    def test_the_manifest_is_readable_without_a_session(self):
+        status, manifest = self.client.request("GET", "/manifest.webmanifest", csrf=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(manifest["name"], "Android Agent")
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual(manifest["start_url"], "/")
+
+    def test_the_manifest_declares_both_icon_sizes_chrome_requires(self):
+        """Both must be purpose "any".
+
+        A maskable icon does not satisfy the requirement, and since the
+        maskable one here is also 512x512 a plain set of sizes would hide
+        a missing standard icon.
+        """
+        _, manifest = self.client.request("GET", "/manifest.webmanifest", csrf=False)
+        usable = {
+            icon["sizes"] for icon in manifest["icons"] if icon.get("purpose") == "any"
+        }
+        self.assertIn("192x192", usable)
+        self.assertIn("512x512", usable)
+
+    def test_a_maskable_icon_is_offered_so_launchers_do_not_crop_the_artwork(self):
+        _, manifest = self.client.request("GET", "/manifest.webmanifest", csrf=False)
+        purposes = {icon.get("purpose") for icon in manifest["icons"]}
+        self.assertIn("maskable", purposes)
+
+    def test_every_icon_the_manifest_names_actually_exists(self):
+        _, manifest = self.client.request("GET", "/manifest.webmanifest", csrf=False)
+        for icon in manifest["icons"]:
+            with self.subTest(icon=icon["src"]):
+                status, body = self.client.request("GET", icon["src"], csrf=False)
+                self.assertEqual(status, 200)
+                self.assertTrue(body["_raw"].startswith(b"\x89PNG"), "not a real PNG")
+
+    def test_the_service_worker_is_served_from_the_root_with_a_fetch_handler(self):
+        status, payload = self.client.request("GET", "/sw.js", csrf=False)
+        self.assertEqual(status, 200)
+        source = payload["_raw"].decode()
+        self.assertIn("addEventListener('fetch'", source)
+
+    def test_the_page_links_the_manifest_so_the_browser_finds_it(self):
+        _, payload = self.client.request("GET", "/", csrf=False)
+        html = payload["_raw"].decode()
+        self.assertIn('rel="manifest"', html)
+        self.assertIn("/manifest.webmanifest", html)
+
+    def test_the_policy_allows_the_manifest_and_the_worker(self):
+        """default-src 'none' blocks both unless they are named explicitly.
+
+        This failed silently the first time: the app simply was not
+        installable and the browser said nothing useful.
+        """
+        policy = self.client.head("/")["Content-Security-Policy"]
+        self.assertIn("manifest-src 'self'", policy)
+        self.assertIn("worker-src 'self'", policy)
+
+
+class StaticAssetTests(unittest.TestCase):
+    """The asset reader, driven directly.
+
+    Going through HTTP hides these: urllib normalises "/static/../x" away
+    before it ever reaches the server, so a traversal test over the wire
+    passes whether or not the guard exists.
+    """
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        outer = Path(self.folder.name)
+        # A real, readable PNG *outside* the asset folder. Without this the
+        # traversal test passes for the wrong reason: a path that escapes
+        # simply names a file that does not exist, and the reader returns
+        # None whether or not any guard is in place.
+        (outer / "outside.png").write_bytes(b"\x89PNG\r\n\x1a\nsecret")
+        root = outer / "static"
+        root.mkdir()
+        (root / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (root / "secret.txt").write_text("not an image")
+        patcher = mock.patch.object(pwa, "STATIC_DIR", root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_an_image_in_the_folder_is_served(self):
+        asset = pwa.read_static("icon.png")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset[1], "image/png")
+
+    def test_a_traversing_name_cannot_reach_a_real_file_outside(self):
+        for name in ("../outside.png", "..", "a/b.png", "a\\b.png", ".env"):
+            with self.subTest(name=name):
+                self.assertIsNone(pwa.read_static(name))
+
+    def test_the_file_outside_is_genuinely_readable(self):
+        """Guards the test above: if this fails, that one proves nothing."""
+        outside = Path(self.folder.name) / "outside.png"
+        self.assertTrue(outside.is_file())
+        self.assertTrue(outside.read_bytes().startswith(b"\x89PNG"))
+
+    def test_a_file_that_is_not_an_image_is_refused(self):
+        """Otherwise the folder becomes an arbitrary file read."""
+        self.assertIsNone(pwa.read_static("secret.txt"))
+
+    def test_a_missing_file_is_refused(self):
+        self.assertIsNone(pwa.read_static("nope.png"))

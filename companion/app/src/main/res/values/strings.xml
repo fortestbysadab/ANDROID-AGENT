@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Android Agent Companion</string>
+    <string name="service_label">Android Agent</string>
+    <string name="service_description">Lets Android Agent read the screen and tap controls for the workflows you ask it to run. It only acts when the agent sends a paired, authenticated request.</string>
+</resources>

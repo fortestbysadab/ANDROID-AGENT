@@ -9,8 +9,6 @@ started from.
 
 from __future__ import annotations
 
-import os
-import pathlib
 import tempfile
 import unittest
 from unittest import mock
@@ -162,7 +160,7 @@ class ApplicationTests(unittest.TestCase):
 class CommandLineTests(unittest.TestCase):
     def test_every_documented_command_is_wired(self):
         self.assertEqual(
-            set(cli.COMMANDS), {"all", "bot", "web", "tick", "doctor", "companion"}
+            set(cli.COMMANDS), {"all", "bot", "web", "tick", "doctor"}
         )
 
     def test_running_with_no_argument_starts_everything(self):
@@ -171,7 +169,7 @@ class CommandLineTests(unittest.TestCase):
             commands["all"].assert_called_once()
 
     def test_each_subcommand_dispatches_to_its_own_runner(self):
-        for name in ("bot", "web", "tick", "doctor", "companion"):
+        for name in ("bot", "web", "tick", "doctor"):
             with self.subTest(command=name):
                 runner = mock.Mock(return_value=0)
                 with mock.patch.dict(cli.COMMANDS, {name: runner}):
@@ -203,38 +201,3 @@ class CommandLineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class CompanionCommandTests(unittest.TestCase):
-    """The companion check builds no Settings, so it must read .env itself."""
-
-    def test_the_pairing_token_is_read_from_a_dotenv_file(self):
-        captured = {}
-
-        class SpyBackend:
-            def __init__(self):
-                captured["token"] = os.environ.get("ANDROID_AGENT_COMPANION_TOKEN")
-
-            def available(self):
-                return False, "stopped here on purpose"
-
-        with tempfile.TemporaryDirectory() as folder:
-            pathlib.Path(folder, ".env").write_text(
-                "ANDROID_AGENT_COMPANION_TOKEN=from-the-file\n", encoding="utf-8"
-            )
-            previous = os.getcwd()
-            environment = {
-                key: value
-                for key, value in os.environ.items()
-                if key != "ANDROID_AGENT_COMPANION_TOKEN"
-            }
-            try:
-                os.chdir(folder)
-                with mock.patch.dict(os.environ, environment, clear=True), mock.patch(
-                    "android_agent.automation.CompanionBackend", SpyBackend
-                ):
-                    cli.run_companion()
-            finally:
-                os.chdir(previous)
-
-        self.assertEqual(captured["token"], "from-the-file")

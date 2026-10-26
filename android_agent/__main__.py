@@ -61,37 +61,6 @@ def run_doctor() -> int:
     return doctor_main() or 0
 
 
-def run_companion() -> int:
-    """Prove the bridge end to end: ping, then read the current screen."""
-    from android_agent.automation import CompanionBackend
-    from android_agent.automation.models import AutomationError
-    from android_agent.config import load_dotenv
-
-    # Every other command reaches .env through Settings.from_env. This one
-    # deliberately builds no settings, so it has to load the file itself or
-    # a perfectly good pairing token sits in .env unread.
-    load_dotenv()
-
-    backend = CompanionBackend()
-    ready, detail = backend.available()
-    if not ready:
-        print(f"Companion: NOT READY\n  {detail}")
-        return 1
-    print("Companion: paired and answering.")
-
-    try:
-        snapshot = backend.snapshot()
-    except AutomationError as exc:
-        print(f"Screen read failed ({exc.code}): {exc}")
-        return 1
-
-    print(f"Foreground app: {snapshot.package or 'unknown'}")
-    print(f"Readable elements: {len(snapshot.elements)}")
-    for element in snapshot.elements[:12]:
-        print(f"  - {element.label[:70]}")
-    return 0
-
-
 def run_all() -> int:
     """Telegram in the foreground, the web console beside it.
 
@@ -133,7 +102,6 @@ COMMANDS = {
     "web": run_web,
     "tick": run_tick,
     "doctor": run_doctor,
-    "companion": run_companion,
 }
 
 

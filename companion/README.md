@@ -54,3 +54,22 @@ and a dump is capped at 400 nodes.
 
 The model never talks to any of this directly; it still only calls
 `run_app_workflow` and `read_app_screen` with allowlisted workflow ids.
+
+## Check it from Termux
+
+```
+python -m android_agent companion
+```
+
+This pings the bridge and then reads the current screen, printing the
+foreground package and the first few labels it can see. It is the fastest
+way to tell a pairing problem from an accessibility-toggle problem.
+
+## Android 13 and later: "Restricted setting"
+
+A sideloaded APK cannot be granted accessibility access from the normal
+toggle; tapping it shows "For your security, this setting is currently
+unavailable". Dismiss that dialog first, since seeing it is what reveals
+the override, then go to the app's info page, open the three-dot menu and
+choose **Allow restricted settings**. The accessibility toggle will then
+work.

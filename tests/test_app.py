@@ -160,7 +160,7 @@ class ApplicationTests(unittest.TestCase):
 class CommandLineTests(unittest.TestCase):
     def test_every_documented_command_is_wired(self):
         self.assertEqual(
-            set(cli.COMMANDS), {"all", "bot", "web", "tick", "doctor"}
+            set(cli.COMMANDS), {"all", "bot", "web", "tick", "doctor", "companion"}
         )
 
     def test_running_with_no_argument_starts_everything(self):
@@ -169,7 +169,7 @@ class CommandLineTests(unittest.TestCase):
             commands["all"].assert_called_once()
 
     def test_each_subcommand_dispatches_to_its_own_runner(self):
-        for name in ("bot", "web", "tick", "doctor"):
+        for name in ("bot", "web", "tick", "doctor", "companion"):
             with self.subTest(command=name):
                 runner = mock.Mock(return_value=0)
                 with mock.patch.dict(cli.COMMANDS, {name: runner}):

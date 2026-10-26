@@ -94,6 +94,7 @@ class AgentAccessibilityService : AccessibilityService() {
         "long_click" -> actOnNode(args, AccessibilityNodeInfo.ACTION_LONG_CLICK)
         "set_text" -> setText(args)
         "scroll" -> scroll(args)
+        "ime_enter" -> imeEnter(args)
         "global" -> globalAction(args)
         "launch" -> launch(args)
         else -> error("unknown_op", "no such operation: $op")
@@ -233,6 +234,31 @@ class AgentAccessibilityService : AccessibilityService() {
             findScrollable(node.getChild(i), depth + 1)?.let { return it }
         }
         return null
+    }
+
+    /**
+     * Presses the editor action on the focused text field.
+     *
+     * An accessibility service cannot inject key events, so this is the only
+     * supported way to "press enter" and submit a search box.
+     */
+    private fun imeEnter(args: JSONObject): JSONObject {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+            return error("unsupported", "this device is too old to submit a text field")
+        }
+        val node = if (args.has("index")) {
+            val (resolved, failure) = resolve(args)
+            if (failure != null) return failure
+            resolved
+        } else {
+            findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        } ?: return error("not_actionable", "no text field is focused")
+
+        val performed = node.performAction(
+            AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id,
+        )
+        return if (performed) ok(JSONObject().put("performed", true))
+        else error("action_failed", "the text field did not accept the enter action")
     }
 
     private fun globalAction(args: JSONObject): JSONObject {
